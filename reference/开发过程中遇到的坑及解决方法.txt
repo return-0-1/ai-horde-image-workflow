@@ -1,0 +1,76 @@
+📝 开发过程中遇到的坑及解决方法
+1. AI Horde LoRA 格式问题（最耗时的坑）
+问题：提交 LoRA 后一直显示 Download Failed，提示词异常
+
+原因：AI Horde API 需要使用模型版本 ID（version_id），而非模型页面 ID（model_id）
+
+3. 状态查询逻辑错误
+问题：任务完成后无法正确识别状态，图片未自动下载
+
+原因：API 返回的 state 字段可能为 None，但 done: true 表示任务已完成，原代码仅检查 state == "done"
+
+解决方案：
+
+在 ai_horde_client.py 和 workflow.py 中同时检查 state == "done" 和 status.get("done") == True
+教训：API 返回字段可能与文档不一致，需要做兼容性处理
+
+4. 函数返回值缺失
+问题：download_images 方法没有返回值，导致下载结果为 None
+
+原因：方法末尾缺少 return images
+
+解决方案：在 ai_horde_client.py 添加 return images
+
+教训：Python 函数默认返回 None，需要显式返回
+
+5. LoRA 参数错误导致 API 400
+问题：inject_trigger: None 导致 API 请求失败
+
+原因：AI Horde API 不接受 null 值，需要过滤掉
+
+解决方案：在 ai_horde_client.py 中过滤掉值为 None 的字段
+
+教训：API 参数需要清理，避免传递无效值
+
+6. 错误的参数传递
+问题：错误传递 control_type: img2img 参数
+
+原因：该参数仅用于 ControlNet，普通生成不需要
+
+解决方案：删除该参数
+
+教训：参数传递要严格按照 API 文档，不要随意添加不确定的参数
+
+8. CivitAI API 超时
+问题：CivitAI 网站无法访问，导致 LoRA 元数据获取失败
+
+原因：网络限制或 API 限流
+
+解决方案：
+
+使用本地配置的 LoRA 信息
+添加错误处理，超时不影响核心功能
+教训：外部依赖需要有降级方案
+
+9. 轮询间隔设置
+问题：默认轮询间隔太短导致频繁请求
+
+解决方案：设置为 10 秒，符合 AI Horde 的最佳实践
+
+教训：API 调用频率需要合理设置，避免被限流
+
+10. GUI 线程安全问题
+问题：在子线程中直接更新 UI 导致崩溃
+
+解决方案：使用 PyQt5 的信号槽机制，通过 pyqtSignal 传递数据
+
+教训：Qt UI 必须在主线程更新，子线程只能发送信号
+
+📌 总结
+类型	数量	关键教训
+API 格式问题	3	仔细阅读 API 文档，关注参数细节
+状态判断问题	2	API 返回字段可能不完整，做兼容性处理
+代码逻辑问题	2	函数返回值、参数清理要注意
+外部依赖问题	2	要有降级方案和错误处理
+UI 线程问题	1	Qt 必须使用信号槽机制
+最重要的教训：遇到问题时，先查看 API 返回的原始数据，很多时候问题出在参数格式或返回值解析上！

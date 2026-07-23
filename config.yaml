@@ -1,0 +1,72 @@
+# ============================================================
+# AI Horde 图像生成工作流 — 配置文件
+# ============================================================
+
+# --- AI Horde API 设置 ---
+ai_horde:
+  api_url: "https://aihorde.net/api/v2"
+  api_key: ""                            # 填写你的 AI Horde API Key，或设置环境变量 AI_HORDE_API_KEY
+  poll_interval: 10                      # 轮询间隔（秒）
+  max_wait: 300                          # 最大等待时间（秒），超时则放弃
+
+# --- CivitAI API 设置 ---
+civitai:
+  api_url: "https://civitai.com/api/v1"
+  timeout: 10                            # 请求超时（秒），超时后降级为本地 LoRA 信息
+
+# --- LLM 设置（用于场景提取 & 提示词生成） ---
+llm:
+  provider: "deepseek"                     # openai | openrouter | custom
+  api_base: "https://api.deepseek.com/v1"
+  api_key: ""                            # 或设置环境变量 OPENAI_API_KEY
+  model: "deepseek-chat"
+  temperature: 0.7
+  max_tokens: 2048
+
+# --- 默认生成参数 ---
+defaults:
+  model: "WAI-NSFW-illustrious-SDXL"
+  width: 512
+  height: 512
+  steps: 25
+  cfg_scale: 7.5
+  sampler: "k_euler_a"
+  clip_skip: 2
+  karras: false
+  hires_fix: false
+  nsfw: true
+  n: 1                                 # 生成张数
+  trusted_workers: false
+  slow_workers: true
+
+# --- LoRA 白名单（手动配置可用的 LoRA） ---
+# 每个条目必须包含：
+#   - name:            显示名称
+#   - version_id:      AI Horde 使用的版本 ID（字符串）
+#   - keywords:        用于匹配的关键词（中文/英文）
+#   - trigger_words:   触发词列表
+#   - base_model:      基础模型（SD1.5 / SDXL / Flux 等）
+#   - strength_model:  模型权重（0-1），默认 0.8
+#   - strength_clip:   CLIP 权重（0-1），默认 0.8
+#   - model_id:        （可选）CivitAI model_id，用于获取在线元数据
+#
+# 示例配置（请根据实际修改）：
+lora_whitelist: []
+#   - name: "示例 LoRA"
+#     version_id: "12345"
+#     keywords: ["示例", "角色名"]
+#     trigger_words: ["trigger_word"]
+#     base_model: "SDXL"
+#     strength_model: 0.8
+#     strength_clip: 0.8
+
+# --- 输出设置 ---
+output:
+  directory: "output"
+  filename_pattern: "{timestamp}_{model}_{seed}.webp"
+
+# --- 日志设置 ---
+logging:
+  level: "INFO"                          # DEBUG | INFO | WARNING | ERROR
+  file: "workflow.log"
+  format: "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
