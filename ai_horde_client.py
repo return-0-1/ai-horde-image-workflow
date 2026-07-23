@@ -6,9 +6,11 @@ AI Horde API 客户端 — 异步图像生成、状态轮询、图片下载。
   - 参数清理: 过滤 None 值，不传无关参数(如 control_type)
   - 返回值:   download_images 必须显式 return
   - LoRA:     使用 version_id (字符串)，不是 model_id
+  - WebP:     AI Horde 返回 WebP，需转 PNG（QQ highway 不支持 WebP）
 """
 
 import os
+import io
 import json
 import time
 import logging
@@ -59,44 +61,37 @@ class AIHordeClient:
         Returns:
             下载的图片本地路径列表。
         """
-        logger.info("开始轮询任务 → id=%s, interval=%ds, max_wait=%ds",
-                    task_id, self.poll_interval, self.max_wait)
-
         status = self._poll(task_id)
-        images = self._download(status)
-        return images
+        return self._download(status)
 
     def get_available_models(self) -> list:
         """获取当前可用的图像模型列表。"""
         data = self._get("/status/models")
-        return [m["name"] for m in data if m.get("type") == "image"]
+        return data if isinstance(data, list) else []
 
     # ------------------------------------------------------------------
-    # 内部 — 构建请求体
+    # 内部 — 提交构建
     # ------------------------------------------------------------------
 
     def _build_payload(self, params: dict) -> dict:
-        """根据用户参数构建 generate/async 请求体，过滤 None 值。"""
         d = self.defaults
-
         loras_raw = params.get("loras", [])
         loras_clean = []
         for lo in loras_raw:
-            item = {"name": str(lo["version_id"]), "model": lo.get("strength_model", d.get("lora_strength_model", 0.8)),
-                    "clip": lo.get("strength_clip", d.get("lora_strength_clip", 0.8)), "inject_trigger": "any"}
-            # 过滤 inject_trigger=None（会导致 API 400）
-            if lo.get("inject_trigger") is not None:
-                item["inject_trigger"] = lo["inject_trigger"]
-            loras_clean.append(item)
+            if isinstance(lo, str):
+                loras_clean.append(lo)
+            elif isinstance(lo, dict):
+                loras_clean.append(lo.get("name", "") if lo.get("model_id") else "")
+        loras_clean = [n for n in loras_clean if n]
 
         payload = {
             "prompt": params["prompt"],
             "params": {
                 "sampler_name": params.get("sampler", d.get("sampler", "k_euler")),
-                "cfg_scale": params.get("cfg_scale", d.get("cfg_scale", 7.5)),
-                "height": params.get("height", d.get("height", 1216)),
-                "width": params.get("width", d.get("width", 832)),
-                "steps": params.get("steps", d.get("steps", 25)),
+                "cfg_scale": float(params.get("cfg_scale", d.get("cfg_scale", 7.5))),
+                "height": int(params.get("height", d.get("height", 512))),
+                "width": int(params.get("width", d.get("width", 512))),
+                "steps": int(params.get("steps", d.get("steps", 25))),
                 "karras": params.get("karras", d.get("karras", False)),
                 "hires_fix": params.get("hires_fix", d.get("hires_fix", False)),
                 "clip_skip": params.get("clip_skip", d.get("clip_skip", 2)),
@@ -115,7 +110,6 @@ class AIHordeClient:
         if params.get("negative"):
             payload["params"]["noprompt"] = params["negative"]
 
-        # 过滤 params 中的 None（注意：不要传 control_type）
         clean_params = {}
         for k, v in payload["params"].items():
             if v is not None:
@@ -129,11 +123,6 @@ class AIHordeClient:
     # ------------------------------------------------------------------
 
     def _poll(self, task_id: str) -> dict:
-        """轮询直到任务完成或超时。使用 /generate/status 端点（返回 generations）。
-
-        ⚠️ 坑点: /generate/check 不返回 generations 字段，
-        必须用 /generate/status 才能拿到图片 URL。
-        """
         start = time.time()
         last_log = start
 
@@ -144,14 +133,12 @@ class AIHordeClient:
 
             status = self._get(f"/generate/status/{task_id}")
 
-            # ⚠️ 坑点: 同时检查 state=="done" 和 done==True
             done = status.get("done", False)
             state = status.get("state", "")
             if done or state == "done":
                 logger.info("任务完成 → id=%s, 耗时=%.1fs", task_id, elapsed)
                 return status
 
-            # 每 30 秒输出一次进度
             if elapsed - last_log >= 30:
                 wait_time = status.get("wait_time", "?")
                 queue_pos = status.get("queue_position", "?")
@@ -166,13 +153,8 @@ class AIHordeClient:
     # ------------------------------------------------------------------
 
     def _download(self, status: dict) -> list:
-        """从任务状态中下载所有生成的图片。
-
-        ⚠️ 坑点: 必须显式 return images 列表。
-        """
         generations = status.get("generations", [])
         if not generations:
-            # 可能 faulted
             faulted = status.get("faulted", False)
             if faulted:
                 logger.error("任务执行失败 (faulted=True)，无图像输出")
@@ -193,22 +175,35 @@ class AIHordeClient:
             seed = gen.get("seed", "unknown")
             model = gen.get("model", "unknown")
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            ext = ".webp" if img_url.endswith(".webp") else ".png"
-            filename = f"{ts}_{model}_{seed}{ext}"
-            filepath = os.path.join(output_dir, filename)
+            filepath = os.path.join(output_dir, f"{ts}_{model}_{seed}.png")
 
             logger.info("下载图片 → %s → %s", img_url[:80], filepath)
             try:
                 req = Request(img_url, headers={"User-Agent": "AI-Horde-Workflow/1.0"})
                 with urlopen(req, timeout=60) as resp:
+                    data = resp.read()
+
+                # AI Horde 返回 WebP → 转 PNG（QQ highway 不支持 WebP）
+                try:
+                    from PIL import Image as PILImage
+                    img = PILImage.open(io.BytesIO(data))
+                    if img.format == "WEBP":
+                        img = img.convert("RGB")
+                        img.save(filepath, "PNG")
+                        logger.info("WebP → PNG 转换完成 → %s", filepath)
+                    else:
+                        with open(filepath, "wb") as f:
+                            f.write(data)
+                except ImportError:
                     with open(filepath, "wb") as f:
-                        f.write(resp.read())
+                        f.write(data)
+
                 images.append(filepath)
                 logger.info("下载完成 → %s (%s)", filepath, gen.get("model"))
             except URLError as e:
                 logger.error("下载失败 → %s: %s", img_url[:80], e)
 
-        return images  # ⚠️ 必须 return
+        return images
 
     # ------------------------------------------------------------------
     # 内部 — HTTP 工具
@@ -227,7 +222,7 @@ class AIHordeClient:
             "User-Agent": "AI-Horde-Workflow/1.0",
         }
         if self.api_key:
-            headers["apikey"] = self.api_key  # AI Horde 使用 'apikey' header
+            headers["apikey"] = self.api_key
 
         data_bytes = None
         if body is not None:

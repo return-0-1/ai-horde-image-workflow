@@ -27,6 +27,7 @@ from prompt_builder import PromptBuilder
 from lora_manager import LoraManager
 from civitai_client import CivitAIClient
 from ai_horde_client import AIHordeClient
+from params_parser import parse as parse_params, merge_overrides
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +126,18 @@ class Workflow:
             logger.info("-" * 40)
             logger.info("阶段 3/4: 提示词生成")
             prompt_data = self.prompt_builder.build_prompt(scene, enriched_loras, user_prefs)
+
+            # ---- 阶段 3.5: 参数覆盖（从用户口语指令中提取） ----
+            param_overrides = parse_params(user_text, llm_client=self.llm)
+            if param_overrides:
+                logger.info("从用户指令中解析出参数覆盖: %s", param_overrides)
+                prompt_data = merge_overrides(prompt_data, param_overrides)
+
+            # 强制 model 使用配置默认值（防止 LLM fallback 幻觉如 "anime"）
+            prompt_data["model"] = self.config.get("defaults", {}).get(
+                "model", prompt_data["model"]
+            )
+
             result["prompt_data"] = prompt_data
             logger.info("Prompt 生成完成 → model=%s, size=%dx%d",
                         prompt_data["model"], prompt_data["width"], prompt_data["height"])
