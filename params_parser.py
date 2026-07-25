@@ -260,15 +260,15 @@ def _llm_fallback(text: str, llm_client) -> dict:
 # ======================================================================
 
 def _validate_dims(overrides: dict) -> dict:
-    """过滤不合理的宽高值（SDXL 要求 >= 256 且为 64 倍数）。"""
-    MIN_DIM = 256
+    """过滤不合理的宽高值（AI Horde 要求 >= 64 且为 64 倍数）。"""
+    MIN_DIM = 64
     MULTIPLE = 64
     for key in ("width", "height"):
         if key in overrides:
             val = overrides[key]
             if val < MIN_DIM or val % MULTIPLE != 0:
                 logger.warning(
-                    "忽略不合理的 %s=%d（需 >=%d 且为 %d 倍数）", key, val, MIN_DIM, MULTIPLE
+                    "忽略不合理的 %s=%d（需 >=64 且为 64 倍数）", key, val
                 )
                 del overrides[key]
     # n 限制在合理范围
