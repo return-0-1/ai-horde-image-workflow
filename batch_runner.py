@@ -121,29 +121,51 @@ class BatchRunner:
     def _parse_file(self, filepath: str) -> list[dict]:
         """解析 TXT 文件，返回场景列表。
 
+        连续的非空行会被合并为一个场景（用空格连接），
+        空行 / 注释行 / 参数行作为场景分隔符。
+
         Returns:
-            [{"text": "场景描述", "line": 行号, "overrides": {...}}, ...]
+            [{"text": "场景描述", "line": 起始行号, "overrides": {...}}, ...]
         """
         if not os.path.exists(filepath):
             raise FileNotFoundError(f"TXT 文件不存在: {filepath}")
 
         scenes = []
         pending_overrides = {}
+        buffer = []       # 当前场景的多行缓冲
+        buffer_start = 0  # 缓冲区起始行号
+
+        def _flush():
+            """将缓冲区中的多行合并为一个场景。"""
+            nonlocal buffer_start, pending_overrides
+            if buffer:
+                text = " ".join(buffer)
+                scenes.append({
+                    "text": text,
+                    "line": buffer_start,
+                    "overrides": dict(pending_overrides),
+                })
+                buffer.clear()
+                buffer_start = 0
+                pending_overrides = {}
 
         with open(filepath, "r", encoding="utf-8") as f:
             for line_no, raw_line in enumerate(f, 1):
                 line = raw_line.rstrip("\n\r")
 
-                # 1. 空行 → 跳过
+                # 1. 空行 → 场景分隔符，flush 缓冲区
                 if not line.strip():
+                    _flush()
                     continue
 
-                # 2. 整行注释 (# 开头) → 跳过
+                # 2. 整行注释 (# 开头) → flush + 跳过
                 if line.strip().startswith("#"):
+                    _flush()
                     continue
 
-                # 3. 参数覆盖行 (-- 开头)
+                # 3. 参数覆盖行 (-- 开头) → flush + 记录参数
                 if line.strip().startswith("--"):
+                    _flush()
                     clean = line.strip()
                     if clean == "--reset":
                         pending_overrides = {}
@@ -159,16 +181,16 @@ class BatchRunner:
                 # 5. 去除前后空白后再检查是否为空
                 text = line.strip()
                 if not text:
+                    _flush()
                     continue
 
-                # 6. 有效场景行
-                scenes.append({
-                    "text": text,
-                    "line": line_no,
-                    "overrides": dict(pending_overrides),
-                })
-                # 参数覆盖只作用于紧接着的一条场景，随后清空
-                pending_overrides = {}
+                # 6. 有效场景行 → 加入缓冲区
+                if not buffer:
+                    buffer_start = line_no
+                buffer.append(text)
+
+        # 文件结束时 flush 剩余缓冲区
+        _flush()
 
         if not scenes:
             raise ValueError(f"TXT 文件中未找到有效场景描述: {filepath}")
