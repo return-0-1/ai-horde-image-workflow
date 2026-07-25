@@ -10,8 +10,11 @@ import os
 import json
 import logging
 from typing import Optional
-from urllib.request import Request, urlopen
+from urllib.request import Request, urlopen, ProxyHandler, build_opener
 from urllib.error import URLError
+
+# 绕过系统代理直连 LLM API（避免 v2rayN 干扰认证）
+_no_proxy_opener = build_opener(ProxyHandler({}))
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +77,7 @@ class LLMClient:
 
         try:
             req = Request(url, data=json.dumps(body).encode("utf-8"), headers=headers)
-            with urlopen(req, timeout=120) as resp:
+            with _no_proxy_opener.open(req, timeout=120) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
         except URLError as e:
             logger.error("LLM API 调用失败: %s", e)

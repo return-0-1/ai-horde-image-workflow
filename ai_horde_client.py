@@ -16,8 +16,12 @@ import time
 import logging
 from datetime import datetime
 from typing import Optional
-from urllib.request import Request, urlopen
+from urllib.request import Request, urlopen, ProxyHandler, build_opener
 from urllib.error import URLError
+
+# 绕过系统代理直连 AI Horde API（避免 v2rayN 干扰认证）
+# 图片下载仍走系统代理（Cloudflare R2 国内可能被墙）
+_no_proxy_opener = build_opener(ProxyHandler({}))
 
 logger = logging.getLogger(__name__)
 
@@ -231,7 +235,7 @@ class AIHordeClient:
         req = Request(url, data=data_bytes, headers=headers, method=method)
 
         try:
-            with urlopen(req, timeout=30) as resp:
+            with _no_proxy_opener.open(req, timeout=30) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except URLError as e:
             logger.error("AI Horde API 请求失败 [%s %s]: %s", method, path, e)
