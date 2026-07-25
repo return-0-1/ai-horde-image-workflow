@@ -124,6 +124,9 @@ class BatchRunner:
         连续的非空行会被合并为一个场景（用空格连接），
         空行 / 注释行 / 参数行作为场景分隔符。
 
+        用 ``---`` 标记的场景块：块内所有内容（包括空行）保留为同一场景，
+        块内行用换行符连接，不做注释/参数解析。
+
         Returns:
             [{"text": "场景描述", "line": 起始行号, "overrides": {...}}, ...]
         """
@@ -134,6 +137,10 @@ class BatchRunner:
         pending_overrides = {}
         buffer = []       # 当前场景的多行缓冲
         buffer_start = 0  # 缓冲区起始行号
+
+        in_block = False       # 是否在 --- 块内
+        block_buffer = []      # 块内行缓冲
+        block_start = 0        # 块起始行号
 
         def _flush():
             """将缓冲区中的多行合并为一个场景。"""
@@ -149,9 +156,43 @@ class BatchRunner:
                 buffer_start = 0
                 pending_overrides = {}
 
+        def _flush_block():
+            """将 --- 块缓冲区合并为一个场景（换行连接）。"""
+            nonlocal block_start, pending_overrides
+            if block_buffer:
+                # 去除首尾空行，内部空行保留
+                text = "\n".join(block_buffer).strip()
+                if text:
+                    scenes.append({
+                        "text": text,
+                        "line": block_start,
+                        "overrides": dict(pending_overrides),
+                    })
+                block_buffer.clear()
+                block_start = 0
+                pending_overrides = {}
+
         with open(filepath, "r", encoding="utf-8") as f:
             for line_no, raw_line in enumerate(f, 1):
                 line = raw_line.rstrip("\n\r")
+
+                # 0. --- 场景块标记（最高优先级）
+                if line.strip() == "---":
+                    if in_block:
+                        # 退出块模式
+                        _flush_block()
+                        in_block = False
+                    else:
+                        # 进入块模式：先 flush 普通缓冲区
+                        _flush()
+                        in_block = True
+                        block_start = line_no + 1
+                    continue
+
+                # 块模式：原样收集所有行
+                if in_block:
+                    block_buffer.append(line)
+                    continue
 
                 # 1. 空行 → 场景分隔符，flush 缓冲区
                 if not line.strip():
@@ -191,6 +232,9 @@ class BatchRunner:
 
         # 文件结束时 flush 剩余缓冲区
         _flush()
+        # 未闭合的 --- 块也 flush
+        if in_block:
+            _flush_block()
 
         if not scenes:
             raise ValueError(f"TXT 文件中未找到有效场景描述: {filepath}")
