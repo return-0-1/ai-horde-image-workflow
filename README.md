@@ -8,7 +8,9 @@
 
 ```
 ├── workflow.py              # 主编排器（CLI 入口 + Python API）
+├── batch_runner.py          # 批量生图（TXT 文件解析 + 逐条编排）
 ├── prompt_builder.py        # 提示词构建（场景提取 + Prompt/Negative 生成）
+├── params_parser.py         # 参数解析（从口语指令中提取分辨率/步数等）
 ├── lora_manager.py          # LoRA 白名单管理 + 关键词匹配
 ├── ai_horde_client.py       # AI Horde API（提交、轮询、下载）
 ├── civitai_client.py        # CivitAI API（LoRA 元数据获取，可选）
@@ -42,21 +44,35 @@ cp .env.example .env
 ### 2. 运行
 
 ```bash
-# 命令行模式
+# 命令行模式（单条）
 python workflow.py "一个少女站在樱花树下，微风拂过她的长发"
+
+# 批量模式（从 TXT 文件读取多条场景）
+python workflow.py --file prompts.txt
+
+# 批量预览（仅生成提示词，不调 AI Horde）
+python workflow.py --file prompts.txt --dry-run
+
+# 批量 + 遇错即停
+python workflow.py --file prompts.txt --stop-on-error
 
 # 试运行模式（只生成提示词，不调 AI Horde）
 python workflow.py "..." --dry-run
+
+# 查询可用模型 / LoRA
+python workflow.py --list-models
+python workflow.py --list-loras
 ```
 
 ### 3. Python API
 
 ```python
 from workflow import Workflow
+from batch_runner import BatchRunner
 
 wf = Workflow("config.yaml")
 
-# 完整生成
+# 单条生成
 result = wf.run("一个白发少女在月光下弹钢琴")
 print(result["images"])       # ["output/20250723_120000_xxx.png"]
 print(result["prompt_data"])  # 完整生成参数
@@ -64,10 +80,13 @@ print(result["prompt_data"])  # 完整生成参数
 # 仅生成提示词
 result = wf.run("...", dry_run=True)
 
-# 查看可用模型
-print(wf.list_available_models())
+# 批量生成（从 TXT 文件）
+runner = BatchRunner(wf)
+results = runner.run_batch("prompts.txt")
+runner.print_summary(results)
 
-# 查看已配置 LoRA
+# 查看可用模型 / LoRA
+print(wf.list_available_models())
 print(wf.list_loras())
 ```
 

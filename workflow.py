@@ -224,24 +224,95 @@ class Workflow:
 
 if __name__ == "__main__":
     import sys
+    import argparse
 
-    if len(sys.argv) < 2:
-        print("用法: python workflow.py <用户文本> [--dry-run] [--config config.yaml]")
-        print("示例: python workflow.py '一个少女在樱花树下微笑'")
-        sys.exit(1)
+    ap = argparse.ArgumentParser(
+        description="AI Horde 图像生成工作流",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+使用示例:
+  # 单条生成
+  python workflow.py "一个少女在樱花树下微笑"
 
-    user_text = sys.argv[1]
-    dry_run = "--dry-run" in sys.argv
+  # Dry run 模式
+  python workflow.py "测试场景" --dry-run
 
-    config_arg_idx = None
-    for i, arg in enumerate(sys.argv):
-        if arg == "--config" and i + 1 < len(sys.argv):
-            config_arg_idx = i
-            break
-    config_path = sys.argv[config_arg_idx + 1] if config_arg_idx else "config.yaml"
+  # 指定配置文件
+  python workflow.py "测试场景" --config my_config.yaml
 
-    wf = Workflow(config_path)
-    result = wf.run(user_text, dry_run=dry_run)
+  # 批量生成（从 TXT 文件）
+  python workflow.py --file prompts.txt
+
+  # 批量 dry run
+  python workflow.py --file prompts.txt --dry-run
+
+  # 批量 + 遇错即停
+  python workflow.py --file prompts.txt --stop-on-error
+
+  # 查询
+  python workflow.py --list-models
+  python workflow.py --list-loras
+        """,
+    )
+
+    # 互斥组：用户文本 / 文件 / 查询
+    group = ap.add_mutually_exclusive_group(required=True)
+    group.add_argument("user_text", nargs="?", default=None,
+                       help="用户场景描述（与 --file 互斥）")
+    group.add_argument("-f", "--file", dest="batch_file", default=None,
+                       help="批量场景 TXT 文件路径")
+    group.add_argument("--list-models", action="store_true",
+                       help="列出 AI Horde 当前可用模型")
+    group.add_argument("--list-loras", action="store_true",
+                       help="列出已配置的 LoRA 白名单")
+
+    ap.add_argument("--dry-run", action="store_true",
+                    help="仅生成提示词，不调用 AI Horde")
+    ap.add_argument("--config", default="config.yaml",
+                    help="配置文件路径（默认 config.yaml）")
+    ap.add_argument("--stop-on-error", action="store_true",
+                    help="批量模式下遇错即停（默认跳过继续）")
+
+    args = ap.parse_args()
+
+    # --- 执行 ---
+    wf = Workflow(args.config)
+
+    # 列表模式
+    if args.list_models:
+        models = wf.list_available_models()
+        print(f"可用模型数: {len(models)}")
+        for m in models[:20]:
+            name = m.get("name", m) if isinstance(m, dict) else m
+            print(f"  - {name}")
+        sys.exit(0)
+
+    if args.list_loras:
+        loras = wf.list_loras()
+        print(f"已配置 LoRA 数: {len(loras)}")
+        for lo in loras:
+            print(f"  - {lo['name']} (base: {lo.get('base_model', '?')})")
+        sys.exit(0)
+
+    # 批量模式
+    if args.batch_file:
+        from batch_runner import BatchRunner
+        runner = BatchRunner(wf)
+        results = runner.run_batch(
+            filepath=args.batch_file,
+            dry_run=args.dry_run,
+            continue_on_error=not args.stop_on_error,
+        )
+        runner.print_summary(results)
+        if any(not r["success"] for r in results):
+            sys.exit(1)
+        sys.exit(0)
+
+    # 单条模式（原逻辑）
+    if not args.user_text:
+        ap.error("请提供场景描述文本或使用 --file 指定批量文件")
+
+    result = wf.run(args.user_text, dry_run=args.dry_run)
 
     # 输出结果摘要
     print("\n" + "=" * 50)
@@ -250,7 +321,7 @@ if __name__ == "__main__":
     print(f"场景: {result['scene'][:100]}...")
     print(f"LoRA: {[l['name'] for l in result['loras_matched']]}")
     print(f"Prompt: {result['prompt_data'].get('prompt', '')[:120]}...")
-    if dry_run:
+    if args.dry_run:
         print("[DRY RUN] 未实际生成图片")
         print(json.dumps(result["prompt_data"], ensure_ascii=False, indent=2))
     elif result["success"]:
@@ -259,3 +330,4 @@ if __name__ == "__main__":
             print(f"   📁 {img}")
     else:
         print(f"❌ 失败: {result['error']}")
+        sys.exit(1)
