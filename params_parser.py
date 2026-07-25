@@ -94,21 +94,21 @@ def parse(user_text: str, llm_client=None) -> dict:
 
     # ---- 3. Steps / 步数 ----
     overrides.update(_parse_int(text, "steps", [
-        r"(?:steps|步数|步)\s*(?:改成|换成|用|为|：|:|=|是)?\s*(\d+)",
-        r"(\d+)\s*(?:steps|步数|步)",
+        r"\b(?:steps|步数|步)\s*(?:改成|换成|用|为|：|:|=|是)?\s*(\d+)",
+        r"(\d+)\s*\b(?:steps|步数|步)\b",
     ]))
 
     # ---- 4. CFG Scale ----
     overrides.update(_parse_float(text, "cfg_scale", [
-        r"(?:cfg|CFG|引导)\s*(?:改成|换成|用|为|：|:|=|是)?\s*(\d+\.?\d*)",
-        r"cfg[=: ]*(\d+\.?\d*)",
+        r"\b(?:cfg|CFG|引导)\s*(?:改成|换成|用|为|：|:|=|是)?\s*(\d+\.?\d*)",
+        r"\bcfg[=: ]*(\d+\.?\d*)",
     ]))
 
     # ---- 5. 采样器 ----
     overrides.update(_parse_sampler(text))
 
     # ---- 6. Clip Skip ----
-    overrides.update(_parse_int(text, "clip_skip", [r"clip[_\s]*skip\s*[：:=]?\s*(\d)", r"跳过层?数?\s*[：:=]?\s*(\d)"]))
+    overrides.update(_parse_int(text, "clip_skip", [r"\bclip[_\s]*skip\s*[：:=]?\s*(\d)", r"跳过层?数?\s*[：:=]?\s*(\d)"]))
 
     # ---- 7. Karras / HiRes Fix 等布尔 ----
     bool_map = {
@@ -134,7 +134,7 @@ def parse(user_text: str, llm_client=None) -> dict:
         overrides["seed"] = seed_match.group(1)
 
     # ---- 10. 生成张数 ----
-    overrides.update(_parse_int(text, "n", [r"(?:n|生成张数|数量)\s*[：:=]?\s*(\d+)", r"生成\s*(\d+)\s*张", r"(\d+)\s*张"]))
+    overrides.update(_parse_int(text, "n", [r"\bn\s*[：:=]?\s*(\d+)", r"生成张数\s*[：:=]?\s*(\d+)", r"生成\s*(\d+)\s*张", r"(\d+)\s*张"]))
 
     # ---- 11. LLM 兜底 ----
     if llm_client and not overrides:
@@ -142,6 +142,8 @@ def parse(user_text: str, llm_client=None) -> dict:
         overrides.update(llm_result)
 
     if overrides:
+        # 过滤不合理的尺寸值（SDXL 要求 >= 256 且为 64 的倍数）
+        overrides = _validate_dims(overrides)
         logger.info("参数覆盖: %s", json.dumps(overrides, ensure_ascii=False))
 
     return overrides
@@ -173,10 +175,10 @@ def _parse_resolution(text: str) -> dict:
 
 
 def _parse_dimensions(text: str) -> dict:
-    """匹配独立的宽/高指定。"""
+    """匹配独立的宽/高指定（要求词边界，避免匹配 age/version 等）。"""
     result = {}
-    m_w = re.search(r"(?:宽|width|w)\s*[：:=]?\s*(\d+)", text, re.IGNORECASE)
-    m_h = re.search(r"(?:高|height|h)\s*[：:=]?\s*(\d+)", text, re.IGNORECASE)
+    m_w = re.search(r"\b(?:宽|width|w)\s*[：:=]?\s*(\d+)", text, re.IGNORECASE)
+    m_h = re.search(r"\b(?:高|height|h)\s*[：:=]?\s*(\d+)", text, re.IGNORECASE)
     if m_w:
         result["width"] = int(m_w.group(1))
     if m_h:
@@ -256,6 +258,25 @@ def _llm_fallback(text: str, llm_client) -> dict:
 # ======================================================================
 # 工具函数
 # ======================================================================
+
+def _validate_dims(overrides: dict) -> dict:
+    """过滤不合理的宽高值（SDXL 要求 >= 256 且为 64 倍数）。"""
+    MIN_DIM = 256
+    MULTIPLE = 64
+    for key in ("width", "height"):
+        if key in overrides:
+            val = overrides[key]
+            if val < MIN_DIM or val % MULTIPLE != 0:
+                logger.warning(
+                    "忽略不合理的 %s=%d（需 >=%d 且为 %d 倍数）", key, val, MIN_DIM, MULTIPLE
+                )
+                del overrides[key]
+    # n 限制在合理范围
+    if "n" in overrides and (overrides["n"] < 1 or overrides["n"] > 20):
+        logger.warning("忽略不合理的 n=%d", overrides["n"])
+        del overrides["n"]
+    return overrides
+
 
 def merge_overrides(base: dict, overrides: dict) -> dict:
     """将参数覆盖合并到基础参数中。overrides 中的非空值覆盖 base。"""
