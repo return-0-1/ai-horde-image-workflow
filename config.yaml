@@ -62,7 +62,7 @@ lora_whitelist: []
 
 # --- 输出设置 ---
 output:
-  directory: "/AstrBot/data/output"
+  directory: "output"
   filename_pattern: "{timestamp}_{model}_{seed}.webp"
 
 # --- 日志设置 ---
