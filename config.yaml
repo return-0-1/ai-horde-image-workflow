@@ -51,14 +51,47 @@ defaults:
 #   - model_id:        （可选）CivitAI model_id，用于获取在线元数据
 #
 # 示例配置（请根据实际修改）：
-lora_whitelist: []
-#   - name: "示例 LoRA"
-#     version_id: "12345"
-#     keywords: ["示例", "角色名"]
-#     trigger_words: ["trigger_word"]
-#     base_model: "SDXL"
-#     strength_model: 0.8
-#     strength_clip: 0.8
+# --- LoRA 自动搜索设置 ---
+lora_search:
+  max_results: 10                        # 每个关键词搜索结果数
+  max_loras: 2                           # 最终提交 LoRA 数量上限
+
+lora_whitelist:
+  - name: "spreading the pussy open with one hand"
+    version_id: "2638973"
+    keywords:
+      - "spread"
+      - "pussy"
+      - "V-shaped"
+      - "fingers"
+      - "one hand"
+      - "张开"
+      - "掰开"
+      - "V字"
+      - "手指"
+      - "pussy_open"
+    trigger_words:
+      - "pussy_openV1"
+    base_model: "SDXL"
+    strength_model: 0.8
+    strength_clip: 0.8
+    model_id: "2346200"
+    description: "单手掰开/片手でマンコを広げる V-shaped fingers — Illustrious, 2.7k downloads"
+
+# --- LoRA 黑名单（AI Horde worker 下载失败的 LoRA） ---
+lora_blacklist:
+  - version_id: "133229"
+    name: "dskb - LKPaR : Self pussy spreading くぱぁ"
+    reason: "SD1.5 LoRA，与主力 SDXL 模型不兼容"
+    model_id: "122355"
+  - version_id: "1505417"
+    name: "Self Pussy Spread (pose) iLLus (Illustrious版)"
+    reason: "worker 下载失败 (Download Failed)，218MB"
+    model_id: "1181007"
+  - version_id: "1329074"
+    name: "Self Pussy Spread (pose) iLLus (Pony版)"
+    reason: "worker 下载失败 (Download Failed)，218MB"
+    model_id: "1181007"
 
 # --- 输出设置 ---
 output:

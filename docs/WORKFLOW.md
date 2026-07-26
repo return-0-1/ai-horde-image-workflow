@@ -25,19 +25,24 @@
 
 ---
 
-### 阶段 2: LoRA 匹配 (`lora_manager.match()`)
+### 阶段 2: LoRA 获取（`lora_manager.match()` + `lora_searcher.search()`）
 
 **输入**: 场景文本 + 基础模型名称
 
-**处理**:
+**处理（Phase 2a — 白名单优先）**:
 1. 遍历 `config.yaml` 中 `lora_whitelist` 的所有条目
 2. 关键词匹配：场景文本中出现 `keywords` 中的词 → 得分 +1
 3. 名称命中 → 额外 +2
 4. 按得分降序返回 top_k 个结果
 
-**后续**: 对每个匹配的 LoRA，尝试调用 CivitAI API 获取在线元数据（描述、触发词）。失败则使用配置中的本地信息。
-
-**输出**: 增强后的 LoRA 列表（含 `online_description`、`online_trigger_words`）
+**处理（Phase 2b — 自动搜索，白名单无匹配时触发）**:
+1. LLM 从场景提取 3-5 个关键概念，按重要性排序
+2. 多线程并行搜索 CivitAI（`nsfw=true`，走 SOCKS5 代理）
+3. 合并去重，按 base model 预筛（SDXL/Illustrious/Pony 兼容）
+4. 跳过黑名单中的 model_id
+5. 获取每个 version 的完整元数据
+6. LLM 审核：过滤不兼容的 base model + 不匹配场景的 LoRA
+7. 按优先级排序，截断到 `max_loras` 上限
 
 ---
 
@@ -150,8 +155,9 @@ OPENAI_API_KEY=sk-xxx   # LLM API Key
 | 模块 | 职责 | 依赖 |
 |------|------|------|
 | `workflow.py` | 编排 4 阶段流程，日志初始化 | 所有模块 |
-| `prompt_builder.py` | LLM 交互、提示词生成、降级策略 | `llm_client` |
+| `prompt_builder.py` | LLM 交互、提示词生成、鲁棒 JSON 解析 | `llm_client` |
 | `lora_manager.py` | LoRA 白名单 CRUD、关键词匹配 | 无 |
+| `lora_searcher.py` | CivitAI 并行搜索、LLM 审核、优先级排序 | `llm_client`, `civitai_client` |
 | `ai_horde_client.py` | HTTP 请求、轮询、下载 | 无 |
 | `civitai_client.py` | CivitAI API 调用、缓存 | 无 |
 | `llm_client.py` | OpenAI 兼容 API 调用 | 无 |
@@ -222,15 +228,17 @@ OPENAI_API_KEY=sk-xxx   # LLM API Key
 ```json
 {
   "loras": [{
-    "name": "67890",           // version_id（字符串）
-    "model": 0.8,              // 模型强度
-    "clip": 0.8,               // CLIP 强度
-    "inject_trigger": "any"    // 或具体触发词，不能为 null
+    "name": "67890",            // version_id（字符串）
+    "model": 0.8,               // 模型强度
+    "clip": 0.8,                // CLIP 强度
+    "is_version": true,         // 标识为版本 ID
+    "inject_trigger": "any"     // 或具体触发词，不能为 null
   }]
 }
 ```
 
 > ⚠️ `name` 必须是版本 ID（version_id），不是模型 ID（model_id）。传错会导致 Download Failed。
+> ⚠️ `is_version: true` 告诉 worker 这是一个 version ID，减少匹配歧义。`inject_trigger` 我们不设，因为 prompt_builder 已手动注入触发词。
 
 ### status 端点 vs check 端点
 
@@ -243,3 +251,16 @@ OPENAI_API_KEY=sk-xxx   # LLM API Key
 | `shared` | ✅ | ❌ |
 
 **结论**: 始终用 `/generate/status/{id}` 做轮询。
+
+### 新增踩坑（V0.2）
+
+| 问题 | 现象 | 修复 |
+|------|------|------|
+| LoRA 提交格式 | `loras: ["2638973"]` → 400 | 改为对象 `{name, model, clip, is_version}` |
+| LLM JSON 尾逗号 | `json.loads` 失败 | `_repair_json` 去尾逗号，4 策略解析 |
+| GBK 编码崩溃 | subprocess `UnicodeDecodeError` | `encoding="utf-8", errors="replace"` |
+| CivitAI 搜索无 NSFW | 全返回 SFW LoRA | 搜索加 `nsfw=true` |
+| 长查询→0 结果 | 10 词查询无匹配 | 拆为 3-5 个短查询并行搜索 |
+| CivitAI 503/超时 | 搜索间歇失败 | 3 次重试 + 缓存 |
+| AI Horde 无 LoRA 状态 | 任务完成不知 LoRA 是否加载 | 目前无解，只能看效果 |
+| CivitAI `baseModel` 过滤无效 | API 忽略该参数 | Python 预筛 `_base_compatible` |

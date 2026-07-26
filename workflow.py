@@ -25,6 +25,7 @@ except ImportError:
 from llm_client import LLMClient
 from prompt_builder import PromptBuilder
 from lora_manager import LoraManager
+from lora_searcher import LoraSearcher
 from civitai_client import CivitAIClient
 from ai_horde_client import AIHordeClient
 from params_parser import parse as parse_params, merge_overrides
@@ -57,6 +58,7 @@ class Workflow:
         self.prompt_builder = PromptBuilder(self.llm, self.config)
         self.lora_manager = LoraManager(self.config)
         self.civitai = CivitAIClient(self.config)
+        self.lora_searcher = LoraSearcher(self.config, self.llm, self.civitai)
         self.horde = AIHordeClient(self.config)
 
         self.base_model = self.config.get("defaults", {}).get("model", "SDXL")
@@ -106,10 +108,32 @@ class Workflow:
             result["scene"] = scene
             logger.info("场景: %s", scene[:120])
 
-            # ---- 阶段 2: LoRA 匹配 ----
+            # ---- 阶段 2: LoRA 匹配（白名单 + 自动搜索） ----
             logger.info("-" * 40)
             logger.info("阶段 2/4: LoRA 匹配")
+
+            # 2a. 白名单关键词匹配
             loras = self.lora_manager.match(scene, base_model=self.base_model)
+
+            # 2b. 白名单无结果 → CivitAI 自动搜索 + LLM 审核
+            searched_loras = []
+            if not loras:
+                logger.info("白名单无匹配，启动 CivitAI 自动搜索...")
+                blacklist_ids = set()
+                for b in self.config.get("lora_blacklist", []):
+                    bid = b.get("model_id", "")
+                    if bid:
+                        blacklist_ids.add(str(bid))
+                try:
+                    searched_loras = self.lora_searcher.search(
+                        scene,
+                        base_model="SDXL",
+                        blacklist_model_ids=blacklist_ids,
+                    )
+                except Exception as e:
+                    logger.warning("LoRA 搜索失败（回退白名单）: %s", e)
+
+            loras = loras + searched_loras
 
             # 用 CivitAI 增强（可选，失败不影响）
             enriched_loras = []

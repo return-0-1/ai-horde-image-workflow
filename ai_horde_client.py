@@ -100,10 +100,17 @@ class AIHordeClient:
         loras_clean = []
         for lo in loras_raw:
             if isinstance(lo, str):
-                loras_clean.append(lo)
+                loras_clean.append({"name": lo, "model": 1, "clip": 1, "is_version": True})
             elif isinstance(lo, dict):
-                loras_clean.append(lo.get("name", "") if lo.get("model_id") else "")
-        loras_clean = [n for n in loras_clean if n]
+                vid = str(lo.get("version_id", ""))
+                if vid:
+                    loras_clean.append({
+                        "name": vid,
+                        "model": lo.get("strength_model", 1),
+                        "clip": lo.get("strength_clip", 1),
+                        "is_version": True,
+                    })
+        loras_clean = [n for n in loras_clean if n.get("name")]
 
         payload = {
             "prompt": params["prompt"],

@@ -7,6 +7,7 @@
 """
 
 import os
+import re
 import json
 import logging
 from typing import Optional
@@ -115,9 +116,8 @@ class PromptBuilder:
         response = self.llm.chat(system_prompt, user_msg, json_mode=True)
         logger.debug("LLM 原始响应（阶段2）: %s", response[:500])
 
-        try:
-            result = json.loads(response)
-        except json.JSONDecodeError:
+        result = self._parse_llm_json(response)
+        if result is None:
             logger.warning("LLM 未返回有效 JSON，使用原始文本作为 prompt")
             result = {"prompt": response, "negative": "", "chinese_note": ""}
 
@@ -153,8 +153,65 @@ class PromptBuilder:
         return result
 
     # ------------------------------------------------------------------
-    # 内部 — 系统提示词
+    # 内部 — JSON 解析
     # ------------------------------------------------------------------
+
+    def _parse_llm_json(self, text: str) -> dict | None:
+        """鲁棒解析 LLM 返回的 JSON，处理常见格式问题。
+
+        尝试顺序:
+          1. 直接 json.loads
+          2. 修复尾逗号后解析
+          3. 去除 markdown 代码围栏后解析
+          4. 找到第一个 { 到最后一个 }，解析 JSON 对象
+
+        Returns:
+            解析成功的 dict，或 None。
+        """
+        if not text or not text.strip():
+            return None
+
+        # 1. 直接解析
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+
+        # 2. 修复常见 JSON 错误（尾逗号）
+        repaired = self._repair_json(text.strip())
+        try:
+            return json.loads(repaired)
+        except json.JSONDecodeError:
+            pass
+
+        # 3. 去除 markdown 围栏 (```json ... ```)，也修复尾逗号
+        cleaned = re.sub(r'^```(?:json)?\s*\n', '', text.strip())
+        cleaned = re.sub(r'\n```\s*$', '', cleaned)
+        cleaned = self._repair_json(cleaned)
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError:
+            pass
+
+        # 4. 提取花括号之间的内容，修复尾逗号
+        start = cleaned.find('{')
+        end = cleaned.rfind('}')
+        if start >= 0 and end > start:
+            extracted = self._repair_json(cleaned[start:end + 1])
+            try:
+                return json.loads(extracted)
+            except json.JSONDecodeError:
+                pass
+
+        return None
+
+    @staticmethod
+    def _repair_json(text: str) -> str:
+        """修复常见 JSON 格式错误：尾逗号。"""
+        # 移除 } 或 ] 前的尾逗号
+        text = re.sub(r',\s*}', '}', text)
+        text = re.sub(r',\s*]', ']', text)
+        return text
 
     def _build_scene_extraction_system_prompt(self) -> str:
         """构建场景提取阶段的系统提示词。"""

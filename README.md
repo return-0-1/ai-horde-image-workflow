@@ -12,6 +12,7 @@
 ├── prompt_builder.py        # 提示词构建（场景提取 + Prompt/Negative 生成）
 ├── params_parser.py         # 参数解析（从口语指令中提取分辨率/步数等）
 ├── lora_manager.py          # LoRA 白名单管理 + 关键词匹配
+├── lora_searcher.py         # LoRA 自动搜索（CivitAI 并行搜索 + LLM 审核）
 ├── ai_horde_client.py       # AI Horde API（提交、轮询、下载）
 ├── civitai_client.py        # CivitAI API（LoRA 元数据获取，可选）
 ├── llm_client.py            # LLM 抽象层（OpenAI 兼容接口）
@@ -130,11 +131,13 @@ print(wf.list_loras())
 ## 工作流概述
 
 ```
-用户文本 → [场景提取] → [LoRA匹配] → [提示词生成] → [AI Horde生成+下载]
+用户文本 → [场景提取] → [LoRA获取] → [提示词生成] → [AI Horde生成+下载]
    │           │              │              │                │
-   │      LLM提取/编造    白名单关键词    专业提示词模板     异步提交
-   │      最后场景         匹配           Prompt+Negative   10s轮询
-   │                                   + 参数 JSON          自动下载
+   │      LLM提取/编造    白名单匹配       专业提示词模板     异步提交
+   │      最后场景         ↓ 无匹配         Prompt+Negative   10s轮询
+   │                 CivitAI并行搜索       + 参数 JSON        自动下载
+   │                 ↓ LLM审核+优先级
+   │                自动LoRA匹配
 ```
 
 详见 [docs/WORKFLOW.md](docs/WORKFLOW.md)。
@@ -147,7 +150,9 @@ print(wf.list_loras())
 
 无其他外部依赖（HTTP 请求全部使用标准库 `urllib`）。
 
-## 配置 LoRA 白名单
+## 配置 LoRA
+
+### 白名单（手动配置）
 
 在 `config.yaml` 的 `lora_whitelist` 中添加：
 
@@ -163,7 +168,28 @@ lora_whitelist:
     strength_clip: 0.8
 ```
 
-> ⚠️ `version_id` 必须是 CivitAI 的 **版本 ID**（模型页面 URL 中的数字），不是模型 ID。这是发送给 AI Horde 的关键参数。
+### 自动搜索（白名单无匹配时触发）
+
+`lora_searcher` 自动从 CivitAI 搜索 LoRA，经 LLM 审核后使用：
+
+```yaml
+lora_search:
+  max_results: 10             # 每个关键词搜索结果数
+  max_loras: 2                # 最终提交 LoRA 数量上限
+```
+
+工作流程：场景 → 提取 3-5 个关键词 → 并行搜索 → 合并去重 → LLM 审核兼容性 → 按优先级截断。
+
+### 黑名单（排除不可用的 LoRA）
+
+```yaml
+lora_blacklist:
+  - version_id: "133229"
+    model_id: "122355"
+    reason: "SD1.5 LoRA，与主力 SDXL 模型不兼容"
+```
+
+> ⚠️ `version_id` 必须是 CivitAI 的 **版本 ID**（模型页面 URL 中的数字），不是模型 ID。
 
 ## 日志
 
@@ -178,3 +204,8 @@ lora_whitelist:
 - 模型名需与 AI Horde 精确匹配 → 通过 API 查询确认
 - LLM 漏字段 → JSON 格式约束 + 降级默认值
 - `.env` 手动加载繁琐 → `python-dotenv` 自动加载
+- LoRA 提交格式错误（字符串 vs 对象） → `is_version` + 对象格式
+- LLM JSON 解析失败（尾逗号/围栏） → 鲁棒解析 `_parse_llm_json`
+- Windows subprocess GBK 编码崩溃 → `encoding="utf-8"`
+- CivitAI 搜索无 NSFW 结果 → `nsfw=true` 参数
+- 搜索关键词过长导致零结果 → 拆分为并行短查询
