@@ -98,15 +98,12 @@ class PromptBuilder:
         lora_context = self._format_lora_context(loras)
         system_prompt += f"\n\n## 当前可用的 LoRA 信息\n{lora_context}"
 
-        # ⚠️ 追加严格的 JSON 格式要求，防止 LLM 漏字段
+        # 补充 JSON 格式约束（模板已定义输出 schema，此处兜底）
         system_prompt += (
             "\n\n---\n"
-            "## ⚠️ 最终输出格式要求（必须严格遵守）\n"
-            "输出必须是 JSON 对象，且**必须包含以下 3 个字段**，缺一不可：\n"
-            '  "prompt": "完整的英文正向提示词",\n'
-            '  "negative": "完整的英文负面提示词（使用通用负面词 + 人物相关负面词）",\n'
-            '  "chinese_note": "中文说明：动→静态凝固点、关键权重分配、风格定位、视角因果过滤说明"\n'
-            "不要遗漏任何字段！直接输出 JSON，不要有任何前言或后记。"
+            "## ⚠️ 输出约束\n"
+            "只输出上述 3 个字段的 JSON 对象，严禁添加 width/height/steps/model/seed 等其他字段。"
+            "直接输出 JSON，不要 markdown 代码块标记。"
         )
 
         user_msg = f"场景描述：{scene}"

@@ -73,14 +73,19 @@
 
 ## 最终输出格式（确认信息完整后）
 
-**Prompt:**
-[完整的英文正向提示词]
+输出纯 JSON，**只允许以下 3 个字段**，不得添加 width/height/steps/model 等任何其他字段：
 
-**Negative Prompt:**
-[完整的英文负面提示词]
+```json
+{
+  "prompt": "[完整的英文正向提示词]",
+  "negative": "[完整的英文负面提示词]",
+  "chinese_note": "[中文说明]"
+}
+```
 
-**中文说明：**
-[简要说明动态→静态的凝固点、关键权重分配、风格定位，并特别说明你如何应用了“视角因果过滤规则”（即剔除了哪些不可见光源，转换成了何种视觉现象）]
+**中文说明** 应包含：动态→静态的凝固点、关键权重分配、风格定位、视角因果过滤规则的应用（剔除了哪些不可见光源，转换成了何种视觉现象）。
+
+直接输出 JSON，不要任何前言后记，不要 markdown 代码块标记。
 
 ---
 
@@ -98,11 +103,10 @@
 请回复“确认”或提出修改，我将立即为您生成最终提示词。
 
 ### 用户回复“确认”后，你的最终输出：
-**Prompt:**
-masterpiece, best quality, highly detailed, 1boy, anime style, sitting in front of a desk, focused expression, staring intently forward, short black hair, deep blue eyes, white t-shirt, dark gray pants, deep night bedroom background, subtle window moonlight, (face illuminated by cool blue light:1.3), (digital screen reflection on skin and eyes:1.2), dramatic side lighting, intense atmosphere, close-up frontal view, 2D illustration
-
-**Negative Prompt:**
-worst quality, low quality, normal quality, lowres, blurry, distorted, deformed, messy, ugly, extra limbs, bad anatomy, bad proportions, distorted limbs, watermark, signature, text, jpeg artifacts, sketch, censorship, bad hands, mutated hands, missing fingers, extra fingers, poorly drawn face, asymmetrical eyes, deformed iris
-
-**中文说明：**
-将“专注坐姿”凝固为“紧盯前方、屏幕冷光打脸”的静态特写。**关键过滤**：严格遵守因果逻辑，因为视角是“显示器看向男生”，所以画面中不存在显示器本体，我刻意删除了“monitor”一词，转而使用“cool blue light”和“digital screen reflection”来描述屏幕光打在角色脸上的视觉现象，有效防止了AI误绘显示器。同时将质量词前置，冷蓝光权重设为1.3以强化氛围。
+```json
+{
+  "prompt": "masterpiece, best quality, highly detailed, 1boy, anime style, sitting in front of a desk, focused expression, staring intently forward, short black hair, deep blue eyes, white t-shirt, dark gray pants, deep night bedroom background, subtle window moonlight, (face illuminated by cool blue light:1.3), (digital screen reflection on skin and eyes:1.2), dramatic side lighting, intense atmosphere, close-up frontal view, 2D illustration",
+  "negative": "worst quality, low quality, normal quality, lowres, blurry, distorted, deformed, messy, ugly, extra limbs, bad anatomy, bad proportions, distorted limbs, watermark, signature, text, jpeg artifacts, sketch, censorship, bad hands, mutated hands, missing fingers, extra fingers, poorly drawn face, asymmetrical eyes, deformed iris",
+  "chinese_note": "将“专注坐姿”凝固为“紧盯前方、屏幕冷光打脸”的静态特写。关键过滤：严格遵守因果逻辑，因为视角是“显示器看向男生”，所以画面中不存在显示器本体，我刻意删除了“monitor”一词，转而使用“cool blue light”和“digital screen reflection”来描述屏幕光打在角色脸上的视觉现象，有效防止了AI误绘显示器。同时将质量词前置，冷蓝光权重设为1.3以强化氛围。"
+}
+```
