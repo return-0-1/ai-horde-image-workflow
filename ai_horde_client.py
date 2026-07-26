@@ -26,13 +26,30 @@ _no_proxy_opener = build_opener(ProxyHandler({}))
 logger = logging.getLogger(__name__)
 
 
+def _read_horde_key() -> str:
+    """直接从项目 .env 文件读取 AI_HORDE_API_KEY（load_dotenv 失效时的兜底）。"""
+    import re as _re
+    _env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if not os.path.exists(_env_path):
+        return ""
+    try:
+        with open(_env_path, "r", encoding="utf-8") as _f:
+            for _line in _f:
+                _m = _re.match(r"^\s*AI_HORDE_API_KEY\s*=\s*(.+?)\s*$", _line)
+                if _m:
+                    return _m.group(1).strip()
+    except Exception:
+        pass
+    return ""
+
+
 class AIHordeClient:
     """AI Horde API 客户端。"""
 
     def __init__(self, config: dict):
         cfg = config.get("ai_horde", {})
         self.api_url = cfg.get("api_url", "https://aihorde.net/api/v2").rstrip("/")
-        self.api_key = cfg.get("api_key") or os.environ.get("AI_HORDE_API_KEY", "")
+        self.api_key = cfg.get("api_key") or os.environ.get("AI_HORDE_API_KEY", "") or _read_horde_key()
         self.poll_interval = cfg.get("poll_interval", 10)
         self.max_wait = cfg.get("max_wait", 300)
         self.defaults = config.get("defaults", {})

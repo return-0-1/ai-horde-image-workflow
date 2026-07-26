@@ -19,13 +19,30 @@ _no_proxy_opener = build_opener(ProxyHandler({}))
 logger = logging.getLogger(__name__)
 
 
+def _read_env_key() -> str:
+    """直接从项目 .env 文件读取 OPENAI_API_KEY（load_dotenv 失效时的兜底）。"""
+    import re as _re
+    _env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if not os.path.exists(_env_path):
+        return ""
+    try:
+        with open(_env_path, "r", encoding="utf-8") as _f:
+            for _line in _f:
+                _m = _re.match(r"^\s*OPENAI_API_KEY\s*=\s*(.+?)\s*$", _line)
+                if _m:
+                    return _m.group(1).strip()
+    except Exception:
+        pass
+    return ""
+
+
 class LLMClient:
     """OpenAI 兼容的 LLM 客户端。"""
 
     def __init__(self, config: dict):
         cfg = config.get("llm", {})
         self.api_base = cfg.get("api_base", "https://api.openai.com/v1").rstrip("/")
-        self.api_key = cfg.get("api_key") or os.environ.get("OPENAI_API_KEY", "")
+        self.api_key = cfg.get("api_key") or os.environ.get("OPENAI_API_KEY", "") or _read_env_key()
         self.model = cfg.get("model", "gpt-4o")
         self.temperature = cfg.get("temperature", 0.7)
         self.max_tokens = cfg.get("max_tokens", 2048)
