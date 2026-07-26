@@ -137,10 +137,15 @@ class PromptBuilder:
         Returns:
             补充了默认值的 result dict。
         """
-        # negative 降级：通用负面词 + 人物负面词
+        # negative 降级：二次 LLM 调用生成针对性 negative，失败则用默认值
         if not result.get("negative", "").strip():
-            logger.info("LLM 未提供 negative，使用默认负面提示词")
-            result["negative"] = self.DEFAULT_NEGATIVE
+            logger.info("LLM 未提供 negative，尝试二次 LLM 生成...")
+            custom_neg = self._generate_negative(result.get("prompt", ""), scene)
+            if custom_neg:
+                result["negative"] = custom_neg
+            else:
+                logger.info("二次生成 negative 失败，使用默认负面提示词")
+                result["negative"] = self.DEFAULT_NEGATIVE
 
         # chinese_note 降级：根据场景自动生成简略说明
         if not result.get("chinese_note", "").strip():
@@ -151,6 +156,23 @@ class PromptBuilder:
             )
 
         return result
+
+    def _generate_negative(self, prompt: str, scene: str) -> str:
+        """二次 LLM 调用：根据 prompt 和场景生成针对性负面提示词。"""
+        if not prompt or not prompt.strip():
+            return ""
+        system = """You are an AI painting negative prompt expert. Given a positive prompt and scene, generate a concise English negative prompt.
+Focus on common SD quality issues AND scene-specific problems to avoid. Output ONLY the negative prompt text, no JSON, no explanations."""
+        user = f"Positive prompt: {prompt[:500]}\nScene: {scene[:200]}\n\nGenerate negative prompt:"
+        try:
+            response = self.llm.chat(system, user, json_mode=False)
+            neg = response.strip()
+            if neg and len(neg) > 5:
+                logger.info("二次 LLM 生成 negative 成功 (%d chars)", len(neg))
+                return neg
+        except Exception as e:
+            logger.warning("二次 LLM 生成 negative 失败: %s", e)
+        return ""
 
     # ------------------------------------------------------------------
     # 内部 — JSON 解析

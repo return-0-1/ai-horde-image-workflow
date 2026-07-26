@@ -109,5 +109,27 @@ class CivitAIClient:
         url = f"{self.api_url}{path}"
         logger.debug("CivitAI 请求 → %s", url)
         req = Request(url, headers={"User-Agent": "AI-Horde-Workflow/1.0"})
-        with urlopen(req, timeout=self.timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+
+        # 直连（短超时，快速失败）
+        try:
+            with urlopen(req, timeout=min(self.timeout, 5)) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except Exception as e:
+            logger.debug("CivitAI 直连失败 → 尝试 curl 代理: %s", e)
+
+        # curl fallback
+        import subprocess
+        try:
+            result = subprocess.run(
+                ["curl", "-s", "--max-time", str(self.timeout),
+                 "--socks5", "127.0.0.1:10808",
+                 "-H", "User-Agent: AI-Horde-Workflow/1.0", url],
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=self.timeout + 5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return json.loads(result.stdout)
+        except Exception:
+            pass
+
+        raise RuntimeError(f"CivitAI 请求失败（直连+curl均失败）: {url}")
