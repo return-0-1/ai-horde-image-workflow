@@ -203,7 +203,25 @@ class PromptBuilder:
             except json.JSONDecodeError:
                 pass
 
-        return None
+        # 5. 兜底：正则提取字段（处理完全无法解析的 JSON）
+        return self._regex_extract_fields(text)
+
+    @staticmethod
+    def _regex_extract_fields(text: str) -> dict | None:
+        """正则兜底：从畸形的 JSON 文本中提取 prompt/negative/chinese_note。"""
+        def _extract(key: str) -> str:
+            pattern = rf'"{key}"\s*:\s*"((?:[^"\\]|\\.)*)"'
+            m = re.search(pattern, text, re.DOTALL)
+            return m.group(1) if m else ""
+
+        prompt = _extract("prompt")
+        if not prompt:
+            return None
+        return {
+            "prompt": prompt,
+            "negative": _extract("negative"),
+            "chinese_note": _extract("chinese_note"),
+        }
 
     @staticmethod
     def _repair_json(text: str) -> str:
