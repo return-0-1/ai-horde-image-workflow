@@ -226,16 +226,28 @@ class PromptBuilder:
 如果提供了 LoRA 信息，请在 prompt 中包含对应的触发词。"""
 
     def _merge_defaults(self, result: dict, loras: list) -> dict:
-        """将 LLM 输出与默认参数合并。"""
+        """将 LLM 输出与默认参数合并，过滤不合理值。"""
         d = self.defaults
+
+        # 宽高校验：必须 >= 64 且为 64 倍数，否则回退默认值
+        def _safe_dim(key: str) -> int:
+            raw = result.get(key)
+            if raw is not None:
+                try:
+                    val = int(raw)
+                    if val >= 64 and val % 64 == 0:
+                        return val
+                except (ValueError, TypeError):
+                    pass
+            return int(d.get(key, 512))
 
         merged = {
             "prompt": result.get("prompt", ""),
             "negative": result.get("negative", ""),
             "chinese_note": result.get("chinese_note", ""),
             "model": result.get("model", d.get("model", "AlbedoBase XL (SDXL)")),
-            "width": int(result.get("width", d.get("width", 832))),
-            "height": int(result.get("height", d.get("height", 1216))),
+            "width": _safe_dim("width"),
+            "height": _safe_dim("height"),
             "steps": int(result.get("steps", d.get("steps", 25))),
             "cfg_scale": float(result.get("cfg_scale", d.get("cfg_scale", 7.5))),
             "sampler": result.get("sampler", d.get("sampler", "k_euler")),
@@ -245,6 +257,6 @@ class PromptBuilder:
             "nsfw": bool(result.get("nsfw", d.get("nsfw", True))),
             "n": int(result.get("n", d.get("n", 1))),
             "seed": result.get("seed", ""),
-            "loras": loras,  # 保留原始 LoRA 列表供 AI Horde client 使用
+            "loras": loras,
         }
         return merged
