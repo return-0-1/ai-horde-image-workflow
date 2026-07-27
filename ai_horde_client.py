@@ -54,6 +54,7 @@ class AIHordeClient:
         self.max_wait = cfg.get("max_wait", 300)
         self.defaults = config.get("defaults", {})
         self.output_cfg = config.get("output", {})
+        self._submitted_ids: list[str] = []  # 追踪已提交的任务 ID
 
     # ------------------------------------------------------------------
     # 公共方法
@@ -74,6 +75,7 @@ class AIHordeClient:
             raise RuntimeError(f"AI Horde 未返回任务 ID: {data}")
 
         logger.info("任务已提交 → id=%s, kudos=%s", task_id, data.get("kudos"))
+        self._submitted_ids.append(task_id)
         return task_id
 
     def wait_and_download(self, task_id: str) -> list:
@@ -89,6 +91,67 @@ class AIHordeClient:
         """获取当前可用的图像模型列表。"""
         data = self._get("/status/models")
         return data if isinstance(data, list) else []
+
+    def get_performance(self) -> dict:
+        """查询 AI Horde 全局性能/排队状态。
+
+        Returns:
+            {
+                "queued_requests": 395, "worker_count": 10, "thread_count": 10,
+                "queued_megapixelsteps": 4063.13, "past_minute_megapixelsteps": 532.11,
+            }
+        """
+        data = self._get("/status/performance")
+        return data if isinstance(data, dict) else {}
+
+    def get_models_status(self) -> list:
+        """查询所有图像模型的排队/worker 状态。
+
+        Returns:
+            模型列表，每项含 name, count, queued, eta, performance 等。
+        """
+        data = self._get("/status/models?type=image")
+        return data if isinstance(data, list) else []
+
+    def get_user_info(self) -> dict:
+        """查询当前用户信息（含 kudos）。"""
+        data = self._get("/find_user")
+        return {
+            "kudos": data.get("kudos", 0),
+        }
+
+    def get_active_tasks(self) -> list:
+        """查询当前已提交但未完成的任务状态。
+
+        逐个检查 _submitted_ids 中的任务，已完成/已失败的移除。
+
+        Returns:
+            [{queue_position, wait_time, done, processing, waiting, faulted}, ...]
+        """
+        active = []
+        still_pending = []
+        for tid in self._submitted_ids:
+            try:
+                s = self._get(f"/generate/status/{tid}")
+            except Exception as e:
+                logger.info("get_active_tasks: 查询 %s 失败: %s", tid[:8], e)
+                still_pending.append(tid)
+                continue
+            if s.get("done") or s.get("faulted"):
+                logger.info("get_active_tasks: %s 已完成，移除", tid[:8])
+                continue  # 已完成，不再追踪
+            still_pending.append(tid)
+            active.append({
+                "id": tid[:8],
+                "queue_position": s.get("queue_position", 0),
+                "wait_time": s.get("wait_time", 0),
+                "done": s.get("done", False),
+                "processing": s.get("processing", 0),
+                "waiting": s.get("waiting", 0),
+                "faulted": s.get("faulted", False),
+            })
+        self._submitted_ids = still_pending
+        return active
 
     # ------------------------------------------------------------------
     # 内部 — 提交构建

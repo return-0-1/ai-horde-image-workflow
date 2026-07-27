@@ -96,7 +96,7 @@ lora_blacklist:
 
 # --- 输出设置 ---
 output:
-  directory: "output"
+  directory: "/AstrBot/data/output"
   filename_pattern: "{timestamp}_{model}_{seed}.webp"
 
 # --- 日志设置 ---

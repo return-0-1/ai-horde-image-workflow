@@ -209,3 +209,31 @@ lora_blacklist:
 - Windows subprocess GBK 编码崩溃 → `encoding="utf-8"`
 - CivitAI 搜索无 NSFW 结果 → `nsfw=true` 参数
 - 搜索关键词过长导致零结果 → 拆分为并行短查询
+- Docker 容器相对路径漂移 → 输出目录改为绝对路径 `/AstrBot/data/output`
+
+## AstrBot 插件命令
+
+配套插件 `astrbot_plugin_ai_horde_image` 提供以下 QQ 机器人命令：
+
+| 命令 | 功能 |
+|------|------|
+| `/draw <描述>` | 生成图片（支持口语化参数如分辨率、采样器等） |
+| `/生图 <描述>` | 同上（中文别名） |
+| `/排队` | 查询 AI Horde 全局排队状态 + 本用户活跃任务 |
+| `/发图` | 手动发送待发的生成图片 |
+
+### `/排队` 输出示例
+
+```
+🔍 **AI Horde 状态**
+📊 全局: 排队 273 请求 | 12 workers (12 线程)
+   吞吐: 997 MP/分钟
+🎯 WAI-NSFW-illustrious-SDXL: 7 workers | ETA ~289s | 排队 4745M px
+
+👤 你的任务 (kudos: 370520)
+  🖼️ 4919b030...: 队列 #3 | 预计 45s | ⏳ 处理中 (处理1/等待0)
+```
+
+任务追踪覆盖两个阶段：
+- **Pre-submit**：提示词工程 / LoRA 搜索阶段 → 显示"⏳ 进行中"
+- **AI Horde 队列**：已提交到 AI Horde → 显示队列位置、预计时间、处理状态
