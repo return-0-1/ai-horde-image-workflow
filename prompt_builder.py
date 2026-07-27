@@ -124,8 +124,32 @@ class PromptBuilder:
         # 降级：若 LLM 未提供 negative/chinese_note，使用默认值
         result = self._ensure_fields(result, scene)
 
+        # 自动面部修复：如果场景含人脸且未手动指定 facefixer_strength
+        if "facefixer_strength" not in result:
+            prompt_text = result.get("prompt", "")
+            if self._has_face(prompt_text, scene):
+                result["facefixer_strength"] = 0.6
+                logger.info("自动启用 facefixer_strength=0.6（检测到人脸）")
+
         # 合并默认参数
         return self._merge_defaults(result, loras)
+
+    # ------------------------------------------------------------------
+    # 自动面部修复检测
+    # ------------------------------------------------------------------
+
+    _FACE_KEYWORDS = [
+        "1girl", "girl", "1boy", "boy", "woman", "man", "lady",
+        "face", "facial", "eyes", "eye", "looking", "smile",
+        "expression", "blush", "portrait", "close-up", "closeup",
+        "1other", "multiple", "group",
+        "女", "少女", "少年", "脸", "眼", "笑", "表情", "面容",
+    ]
+
+    def _has_face(self, prompt: str, scene: str) -> bool:
+        """检测场景中是否包含人脸。"""
+        text = (prompt + " " + scene).lower()
+        return any(kw.lower() in text for kw in self._FACE_KEYWORDS)
 
     def _ensure_fields(self, result: dict, scene: str) -> dict:
         """确保 negative 和 chinese_note 不为空，提供降级默认值。
