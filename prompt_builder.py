@@ -352,5 +352,6 @@ Focus on common SD quality issues AND scene-specific problems to avoid. Output O
             "n": int(result.get("n", d.get("n", 1))),
             "seed": result.get("seed", ""),
             "loras": loras,
+            "facefixer_strength": float(result.get("facefixer_strength", d.get("facefixer_strength", 0.0))),
         }
         return merged

@@ -38,6 +38,7 @@ defaults:
   n: 1                                 # 生成张数
   trusted_workers: false
   slow_workers: true
+  facefixer_strength: 0.0             # 面部修复强度（0.0-1.0，0=禁用）
 
 # --- LoRA 白名单（手动配置可用的 LoRA） ---
 # 每个条目必须包含：

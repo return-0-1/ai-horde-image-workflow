@@ -128,6 +128,7 @@ class AIHordeClient:
                 "seed": str(params["seed"]) if params.get("seed") else "",
             },
             "nsfw": params.get("nsfw", d.get("nsfw", True)),
+            "facefixer_strength": float(params.get("facefixer_strength", d.get("facefixer_strength", 0.0))),
             "trusted_workers": params.get("trusted_workers", d.get("trusted_workers", False)),
             "slow_workers": params.get("slow_workers", d.get("slow_workers", True)),
             "censor_nsfw": False,
