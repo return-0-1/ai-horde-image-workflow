@@ -178,7 +178,7 @@ def _parse_dimensions(text: str) -> dict:
     """匹配独立的宽/高指定（要求词边界，避免匹配 age/version 等）。"""
     result = {}
     m_w = re.search(r"(?<![a-zA-Z])(?:宽|width)\s*(?:改成|换成|用|为|：|:|=|是)?\s*(\d+)", text, re.IGNORECASE)
-    m_h = re.search(r"(?<![a-zA-Z])(?:高|height)\s*(?:改成|换成|用|为|：|:|=|是)?\s*(\d+)", text, re.IGNORECASE)
+    m_h = re.search(r"(?<![a-zA-Z])高\s*(?:改成|换成|用|为|：|:|=|是)?\s*(\d+)", text, re.IGNORECASE)
     if m_w:
         result["width"] = int(m_w.group(1))
     if m_h:

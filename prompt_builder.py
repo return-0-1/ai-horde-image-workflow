@@ -99,12 +99,13 @@ class PromptBuilder:
         lora_context = self._format_lora_context(loras)
         system_prompt += f"\n\n## 当前可用的 LoRA 信息\n{lora_context}"
 
-        # 补充 JSON 格式约束（模板已定义输出 schema，此处兜底）
+        # 补充 JSON 格式约束 + 跳过信息核查步骤
         system_prompt += (
             "\n\n---\n"
             "## ⚠️ 输出约束\n"
+            "场景描述已由上游系统完成信息补全，请**跳过第一步信息核查**，直接进行第二步输出。\n"
             "只输出上述 3 个字段的 JSON 对象，严禁添加 width/height/steps/model/seed 等其他字段。"
-            "直接输出 JSON，不要 markdown 代码块标记。"
+            "直接输出 JSON，不要任何前言后记，不要 markdown 代码块标记。"
         )
 
         user_msg = f"场景描述：{scene}"
@@ -114,12 +115,44 @@ class PromptBuilder:
         user_msg += "\n\n请输出最终提示词。"
 
         response = self.llm.chat(system_prompt, user_msg, json_mode=True)
-        logger.debug("LLM 原始响应（阶段2）: %s", response[:500])
+        logger.info("LLM 原始响应（阶段2，前500字符）: %s", response[:500])
 
         result = self._parse_llm_json(response)
         if result is None:
-            logger.warning("LLM 未返回有效 JSON，使用原始文本作为 prompt")
-            result = {"prompt": response, "negative": "", "chinese_note": ""}
+            logger.warning("LLM 未返回有效 JSON (len=%d, empty=%s)",
+                           len(response), not response.strip())
+
+            # 检查原始响应是否为空/空格或过短（DeepSeek 间歇性静默拒绝）
+            if not response or not response.strip() or len(response.strip()) < 20:
+                logger.warning("原始响应为空或过短，重试一次（不使用 JSON mode）...")
+                try:
+                    response_retry = self.llm.chat(system_prompt, user_msg, json_mode=False)
+                    result_retry = self._parse_llm_json(response_retry)
+                    if result_retry:
+                        result = result_retry
+                        logger.info("重试成功，JSON 解析通过")
+                    elif response_retry and response_retry.strip():
+                        result = {"prompt": response_retry.strip(),
+                                  "negative": "", "chinese_note": ""}
+                        logger.info("重试返回非 JSON 文本 (%d chars)，作为 prompt 使用",
+                                    len(response_retry.strip()))
+                    else:
+                        logger.error("重试仍然为空，使用兜底规则生成")
+                        result = {"prompt": "", "negative": "", "chinese_note": ""}
+                except Exception as e:
+                    logger.error("重试失败: %s，使用兜底规则生成", e)
+                    result = {"prompt": "", "negative": "", "chinese_note": ""}
+            else:
+                # 原始响应有内容但非 JSON，直接用作 prompt
+                result = {"prompt": response, "negative": "", "chinese_note": ""}
+
+        # 兜底：prompt 仍为空则用场景描述做规则生成
+        if not result.get("prompt", "").strip():
+            logger.warning("prompt 仍为空，使用场景规则兜底生成")
+            fallback = self._fallback_prompt_from_scene(scene)
+            result["prompt"] = fallback["prompt"]
+            result["negative"] = fallback["negative"]
+            result["chinese_note"] = fallback["chinese_note"]
 
         # 降级：若 LLM 未提供 negative/chinese_note，使用默认值
         result = self._ensure_fields(result, scene)
@@ -197,6 +230,49 @@ Focus on common SD quality issues AND scene-specific problems to avoid. Output O
         except Exception as e:
             logger.warning("二次 LLM 生成 negative 失败: %s", e)
         return ""
+
+    def _fallback_prompt_from_scene(self, scene: str) -> dict:
+        """兜底：当 LLM 完全无响应时，用简单规则从中文场景生成英文 prompt。
+
+        这确保即使在 DeepSeek 静默拒绝的情况下，
+        也能生成一个可用的 prompt 而不是空白。
+        """
+        quality = "masterpiece, best quality, highly detailed"
+        style = "anime style, manga style, 2D illustration"
+
+        keywords = []
+
+        if any(w in scene for w in ["少女", "女孩", "女性", "女", "她"]):
+            keywords.append("1girl")
+        elif any(w in scene for w in ["少年", "男孩", "男性", "男", "他"]):
+            keywords.append("1boy")
+
+        kw_map = {
+            "双马尾": "twintails", "长发": "long hair", "短发": "short hair",
+            "黑发": "black hair", "金发": "blonde hair", "白发": "white hair",
+            "巨乳": "large breasts", "连衣裙": "dress", "制服": "school uniform",
+            "微笑": "smile", "害羞": "shy", "脸红": "blush",
+            "樱花": "cherry blossoms", "海滩": "beach", "教室": "classroom",
+            "厕所": "restroom", "隔间": "stall", "瓷砖": "tiled wall",
+            "阳光": "sunlight", "月光": "moonlight",
+        }
+
+        for cn, en in kw_map.items():
+            if cn in scene:
+                keywords.append(en)
+
+        desc = scene[:150].replace("\n", " ")
+
+        prompt = f"{quality}, {style}, {', '.join(keywords)}, {desc}"
+
+        return {
+            "prompt": prompt,
+            "negative": self.DEFAULT_NEGATIVE,
+            "chinese_note": (
+                f"（兜底规则生成：LLM API 返回空响应，使用关键词提取构建 prompt。"
+                f"原场景：{scene[:60]}...）"
+            ),
+        }
 
     # ------------------------------------------------------------------
     # 内部 — JSON 解析
