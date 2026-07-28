@@ -3,15 +3,18 @@ LoRA 搜索器 — 从 CivitAI 搜索 LoRA + LLM 审核适配性。
 
 流程:
   场景文本 → 提取搜索关键词 → CivitAI API 搜索 (nsfw=true)
-  → 获取每个 version 元数据 → 黑名单过滤 → LLM 审核 → 返回候选
+  → 获取每个 version 元数据 → 黑名单过滤 → 文本相似度预排序
+  → LLM 评分审核 → 返回候选（必返回至少 0 个最优结果）
 
 LLM 审核失败 → 返回空列表（调用方回退白名单）。
 """
+
 import re
 import json
 import time
 import logging
 from typing import Optional
+from difflib import SequenceMatcher
 from urllib.request import Request, urlopen
 from urllib.error import URLError
 
@@ -34,8 +37,9 @@ class LoraSearcher:
         self.llm = llm_client
         self.civitai = civitai_client
         self.search_limit = config.get("lora_search", {}).get("max_results", 10)
-        self.review_limit = 5  # 最多送给 LLM 审核的候选数
+        self.review_limit = 15  # 最多送给 LLM 审核的候选数（从 5 提升）
         self.max_submit = config.get("lora_search", {}).get("max_loras", 2)  # 最终提交上限
+        self.min_score = config.get("lora_search", {}).get("min_score", 3)  # 最低通过分 (1-10)
         self._cache: dict[str, list] = {}  # query → 缓存的搜索结果
 
         # CivitAI API 地址：优先使用代理 URL，否则直连
@@ -67,7 +71,7 @@ class LoraSearcher:
         """
         blacklist = blacklist_model_ids or set()
 
-        # 1. 从场景文本提取搜索关键词（拆分为独立短查询）
+        # 1. 从场景文本提取搜索关键词（拆分为独立短查询，含排除指引）
         queries = self._extract_query(scene_text)
         logger.info("LoRA 搜索查询 (%d): %s", len(queries), queries)
 
@@ -94,7 +98,7 @@ class LoraSearcher:
             if not version_id:
                 continue
 
-            # 获取完整 metadata（用 curl 走代理，不用 civitai_client 的 urllib）
+            # 获取完整 metadata
             try:
                 meta = self._http_get(
                     f"{self._api_base}/model-versions/{version_id}",
@@ -113,40 +117,64 @@ class LoraSearcher:
             logger.info("无可用候选（全部被过滤）")
             return []
 
-        # 限制候选数量
-        candidates = candidates[:self.review_limit]
-        logger.info("候选 LoRA (%d 个): %s", len(candidates),
-                    [(c["version_id"], c["name"]) for c in candidates])
+        # 3.5 文本相似度预排序：用英文搜索词代替中文场景做比较
+        candidates = self._rank_by_similarity(candidates, queries)
 
-        # 4. LLM 审核
+        # 限制候选数量（扩大到 15）
+        candidates = candidates[:self.review_limit]
+        logger.info("候选 LoRA (%d 个，相似度排序后): %s", len(candidates),
+                    [(c["version_id"], c["name"][:35], round(c.get("_sim", 0), 2))
+                     for c in candidates])
+
+        # 4. LLM 评分审核
         try:
-            approved = self._llm_review(scene_text, base_model, candidates)
+            scored = self._llm_review(scene_text, base_model, candidates)
         except Exception as e:
             logger.warning("LLM 审核失败: %s — 降级为空列表", e)
             return []
 
-        logger.info("LLM 审核通过 %d 个 LoRA: %s",
-                    len(approved), [(a["version_id"], a.get("_priority", "?")) for a in approved])
+        if not scored:
+            logger.info("LLM 审核后无通过候选")
+            return []
 
-        # 按优先级排序（高优先级 = 低 _priority 值）
-        approved.sort(key=lambda a: a.get("_priority", 99))
+        # 日志：输出所有候选的评分
+        for s in scored:
+            logger.info("  LoRA [%s] %s → 评分 %d/10%s",
+                        s["version_id"], s["name"][:40], s["_score"],
+                        " ✅" if s["_score"] >= self.min_score else " ❌ (低于阈值)")
 
-        # 截断到提交上限（避免 AI Horde LoRA 过载）
-        if len(approved) > self.max_submit:
-            logger.info("截断 LoRA 数量 %d → %d（按优先级）", len(approved), self.max_submit)
-            approved = approved[:self.max_submit]
+        # 按评分降序
+        scored.sort(key=lambda a: (a["_score"], -a.get("_sim", 0)), reverse=True)
 
-        return approved
+        # 截断到提交上限
+        if len(scored) > self.max_submit:
+            logger.info("截断 LoRA 数量 %d → %d（按评分）", len(scored), self.max_submit)
+            scored = scored[:self.max_submit]
+
+        logger.info("最终入选 %d 个 LoRA: %s",
+                    len(scored), [(a["version_id"], a["name"][:25], f"{a['_score']}/10") for a in scored])
+
+        return scored
 
     # ------------------------------------------------------------------
     # 内部 — 关键词提取
     # ------------------------------------------------------------------
 
     def _extract_query(self, scene_text: str) -> list[str]:
-        """从场景文本提取搜索关键词，按优先级排序（高→低）。"""
-        system = """You are a keyword extractor. From a scene description, extract 3-5 specific search terms for CivitAI LoRA search.
+        """从场景文本提取搜索关键词，按优先级排序（高→低）。
+
+        改进：引导 LLM 排除角色名称/名人等噪声词。
+        """
+        system = """You are a keyword extractor for CivitAI LoRA search.
+From a scene description, extract 3-5 specific search terms.
 Each term should be ONE concept: an object (e.g. "twin tails"), an action ("spread pussy"), or a setting ("toilet stall").
 Rank by importance to the scene — the most critical visual element first.
+
+CRITICAL: Choose terms that describe VISUAL ELEMENTS, not character identities.
+Prefer generic descriptive terms over specific names.
+Good: "black hair", "school uniform", "cherry blossoms"
+Bad: "Wonder Woman", "Naruto", "Batman"
+
 Output one term per line, nothing else. No numbering, no punctuation, no explanations."""
         try:
             response = self.llm.chat(system, f"Scene: {scene_text}")
@@ -156,6 +184,32 @@ Output one term per line, nothing else. No numbering, no punctuation, no explana
             return keywords if keywords else [scene_text[:40]]
         except Exception:
             return [scene_text[:40]]
+
+    # ------------------------------------------------------------------
+    # 内部 — 文本相似度排序
+    # ------------------------------------------------------------------
+
+    def _rank_by_similarity(self, candidates: list[dict], queries: list[str]) -> list[dict]:
+        """用搜索词-名称文本相似度对候选重新排序。
+
+        把名称与搜索关键词更匹配的候选推到前面，
+        减少角色特化 LoRA 因热度高而占位的问题。
+        queries: 英文搜索关键词列表（由 _extract_query 产生）。
+        """
+        # 合并所有搜索词为比较文本
+        query_text = " ".join(queries).lower()
+        for c in candidates:
+            name_lower = c.get("name", "").lower()
+            # 序列相似度
+            sim = SequenceMatcher(None, query_text[:200], name_lower[:200]).ratio()
+            # 关键词命中加分
+            name_words = set(name_lower.replace("-", " ").replace("_", " ").split())
+            query_words = set(query_text.split())
+            overlap = len(name_words & query_words)
+            c["_sim"] = sim + overlap * 0.2  # 每个重叠词 +0.2
+        # 按 _sim 降序排序
+        candidates.sort(key=lambda c: c.get("_sim", 0), reverse=True)
+        return candidates
 
     # ------------------------------------------------------------------
     # 内部 — CivitAI 搜索
@@ -312,42 +366,51 @@ Output one term per line, nothing else. No numbering, no punctuation, no explana
         return list(keywords)[:15]
 
     # ------------------------------------------------------------------
-    # 内部 — LLM 审核
+    # 内部 — LLM 审核（评分制）
     # ------------------------------------------------------------------
 
     def _llm_review(self, scene_text: str, base_model: str,
                     candidates: list[dict]) -> list[dict]:
-        """LLM 审核候选 LoRA 的兼容性和匹配度。
+        """LLM 评分审核候选 LoRA。
+
+        改为评分制（1-10 分），而非二元 pass/fail。
+        评分 ≥ min_score 的入选，按分数降序排列。
 
         Returns:
-            审核通过的 LoRA 列表。
+            评分后的 LoRA 列表（含 _score 字段），可能为空。
         """
         if not candidates:
             return []
 
-        # 构建候选列表
+        # 构建候选列表（含描述，让 LLM 更好地判断）
         cand_lines = []
         for i, c in enumerate(candidates):
             cand_lines.append(
                 f"{i}: [{c['version_id']}] {c['name']}\n"
-                f"   base={c['base_model']}, trigger={c['trigger_words']}"
+                f"   base={c['base_model']}, trigger={c['trigger_words'][:5] if c['trigger_words'] else 'none'}"
             )
         cand_text = "\n".join(cand_lines)
 
-        system = f"""你是一个 AI 绘画 LoRA 审核助手。根据以下条件审核候选 LoRA：
+        system = f"""你是一个 AI 绘画 LoRA 评分助手。根据以下条件为每个候选 LoRA 打分：
 
 目标场景: {scene_text[:200]}
-目标基础模型: {base_model}（优先 SDXL/Illustrious/Pony 兼容的）
+目标基础模型: {base_model}（SDXL/Illustrious/Pony/NoobAI 都视为兼容）
 
-审核规则:
-1. base_model 必须与目标兼容：SDXL/Illustrious/Pony/NoobAI 都视为兼容 SDXL
-2. SD1.5 / Other / Flux / Wan Video 的排除
-3. 与场景匹配度：LoRA 描述/触发词是否与场景相关
-4. 排除明显无关的（如角色特化 LoRA 与场景无关）
+评分标准 (1-10 分):
+- 9-10: 完美匹配，LoRA 主题与场景高度相关，触发词可直接增强画面
+- 7-8: 良好匹配，LoRA 风格/元素与场景有一定关联
+- 5-6: 可接受，LoRA 不冲突但也不直接相关（如通用风格 LoRA）
+- 3-4: 弱相关，可能有少量元素重叠
+- 1-2: 完全不相关，角色特化或无关主题
+
+注意：
+- 角色特化 LoRA（如 "Wonder Girl"、"Batman" 等）若与场景无关，给 1-2 分
+- 风格/质感 LoRA（如 "watercolor style"、"detail enhancer"）可给 5-7 分
+- 即使没有完美匹配，也要认真评估每个候选，给合理的分数
 
 输出 JSON：
-{{"approved": [索引号, ...], "rejected": [{{"index": 索引号, "reason": "原因"}}, ...]}}
-只输出 JSON，不要其他内容。"""
+{{"scores": [{{"index": 0, "score": 8, "reason": "简短理由"}}, ...]}}
+每个候选都必须打分，只输出 JSON，不要其他内容。"""
 
         try:
             response = self.llm.chat(system, cand_text, json_mode=True)
@@ -356,14 +419,36 @@ Output one term per line, nothing else. No numbering, no punctuation, no explana
             logger.warning("LLM 审核解析失败: %s", e)
             return []
 
-        approved_indices = set(result.get("approved", []))
-        rejected = result.get("rejected", [])
+        scores = result.get("scores", [])
+        # 兼容旧格式：LLM 可能仍返回 approved/rejected
+        if not scores and "approved" in result:
+            logger.info("LLM 返回旧格式 approved/rejected，自动转换")
+            approved_indices = set(result.get("approved", []))
+            for i in range(len(candidates)):
+                scores.append({
+                    "index": i,
+                    "score": 8 if i in approved_indices else 2,
+                    "reason": "auto-converted from old format",
+                })
 
-        for r in rejected:
-            logger.info("LLM 拒绝 → [%s] %s: %s",
-                        candidates[r["index"]]["version_id"],
-                        candidates[r["index"]]["name"][:40],
-                        r.get("reason", "无原因"))
+        # 校验 + 附加分数
+        scored = []
+        for s in scores:
+            idx = s.get("index", -1)
+            score = s.get("score", 0)
+            if 0 <= idx < len(candidates):
+                c = dict(candidates[idx])
+                c["_score"] = max(1, min(10, int(score)))  # clamp 1-10
+                c["_reason"] = s.get("reason", "")
+                scored.append(c)
 
-        approved = [candidates[i] for i in approved_indices if 0 <= i < len(candidates)]
-        return approved
+        # 过滤：只保留评分 ≥ min_score 的
+        passed = [s for s in scored if s["_score"] >= self.min_score]
+
+        if not passed and scored:
+            logger.info("所有候选评分均低于阈值 %d，选取最高分候选", self.min_score)
+            best = max(scored, key=lambda s: s["_score"])
+            best["_reason"] = f"自动入选（最高分 {best['_score']}/10，低于阈值但无更好选择）: {best.get('_reason', '')}"
+            passed = [best]
+
+        return passed

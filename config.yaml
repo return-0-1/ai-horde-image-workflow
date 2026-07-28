@@ -13,6 +13,9 @@ ai_horde:
 civitai:
   api_url: "https://civitai.com/api/v1"
   timeout: 20                            # 请求超时（秒），超时后降级为 curl 代理
+  # 代理 URL（可选）：设置后所有 CivitAI 请求走此反代，无需 VPN
+  # 已部署: https://civitai-proxy-ex1.pages.dev
+  proxy_url: "https://civitai-proxy-ex1.pages.dev/api/v1"
 
 # --- LLM 设置（用于场景提取 & 提示词生成） ---
 llm:
@@ -26,8 +29,8 @@ llm:
 # --- 默认生成参数 ---
 defaults:
   model: "WAI-NSFW-illustrious-SDXL"
-  width: 512
-  height: 512
+  width: 1024
+  height: 1024
   steps: 25
   cfg_scale: 7.5
   sampler: "k_euler_a"
@@ -56,6 +59,7 @@ defaults:
 lora_search:
   max_results: 10                        # 每个关键词搜索结果数
   max_loras: 2                           # 最终提交 LoRA 数量上限
+  min_score: 3                           # LLM 审核最低通过分 (1-10)
 
 lora_whitelist:
   - name: "spreading the pussy open with one hand"
@@ -96,7 +100,7 @@ lora_blacklist:
 
 # --- 输出设置 ---
 output:
-  directory: "/AstrBot/data/output"
+  directory: "output"
   filename_pattern: "{timestamp}_{model}_{seed}.webp"
 
 # --- 日志设置 ---
