@@ -100,22 +100,14 @@ class Workflow:
         }
 
         try:
-            # ---- 阶段 1: 场景提取 ----
+            # ---- 阶段 1: LoRA 匹配（直接用用户文本，不提前提取场景） ----
             logger.info("=" * 50)
-            logger.info("阶段 1/4: 场景提取")
-            extract_result = self.prompt_builder.extract_scene(user_text)
-            scene = extract_result["scene"]
-            result["scene"] = scene
-            logger.info("场景: %s", scene[:120])
+            logger.info("阶段 1/3: LoRA 匹配")
 
-            # ---- 阶段 2: LoRA 匹配（白名单 + 自动搜索） ----
-            logger.info("-" * 40)
-            logger.info("阶段 2/4: LoRA 匹配")
+            # 1a. 白名单关键词匹配（用原始用户文本，节省一次 LLM 调用）
+            loras = self.lora_manager.match(user_text, base_model=self.base_model)
 
-            # 2a. 白名单关键词匹配
-            loras = self.lora_manager.match(scene, base_model=self.base_model)
-
-            # 2b. 白名单无结果 → CivitAI 自动搜索 + LLM 审核
+            # 1b. 白名单无结果 → CivitAI 自动搜索 + LLM 审核
             searched_loras = []
             if not loras:
                 logger.info("白名单无匹配，启动 CivitAI 自动搜索...")
@@ -126,7 +118,7 @@ class Workflow:
                         blacklist_ids.add(str(bid))
                 try:
                     searched_loras = self.lora_searcher.search(
-                        scene,
+                        user_text,
                         base_model="SDXL",
                         blacklist_model_ids=blacklist_ids,
                     )
@@ -135,7 +127,7 @@ class Workflow:
 
             loras = loras + searched_loras
 
-            # 用 CivitAI 增强（可选，失败不影响）
+            # 用 CivitAI 增强（失败不影响）
             enriched_loras = []
             for lo in loras:
                 try:
@@ -146,12 +138,29 @@ class Workflow:
                 enriched_loras.append(enriched)
             result["loras_matched"] = enriched_loras
 
-            # ---- 阶段 3: 提示词生成 ----
+            # ---- 阶段 2: 场景提取 + 提示词生成（合并为一次 LLM 调用） ----
             logger.info("-" * 40)
-            logger.info("阶段 3/4: 提示词生成")
-            prompt_data = self.prompt_builder.build_prompt(scene, enriched_loras, user_prefs)
+            logger.info("阶段 2/3: 场景提取 + 提示词生成（合并模式）")
 
-            # ---- 阶段 3.5: 参数覆盖（从用户口语指令中提取） ----
+            prompt_data = self.prompt_builder.build_prompt_from_user_text(
+                user_text, enriched_loras, user_prefs,
+            )
+
+            if prompt_data is None:
+                # 合并模式失败 → 回退到两阶段模式
+                logger.warning("合并模式失败，回退到两阶段模式")
+                extract_result = self.prompt_builder.extract_scene(user_text)
+                scene = extract_result["scene"]
+                result["scene"] = scene
+                prompt_data = self.prompt_builder.build_prompt(scene, enriched_loras, user_prefs)
+            else:
+                # 提取 scene 信息（合并模式在 prompt_data 中已包含）
+                scene = prompt_data.pop("_scene", user_text.strip()[:200])
+                result["scene"] = scene
+                # 清理内部字段
+                prompt_data.pop("_is_fabricated", None)
+
+            # ---- 阶段 2.5: 参数覆盖（从用户口语指令中提取） ----
             param_overrides = parse_params(user_text, llm_client=self.llm)
             if param_overrides:
                 logger.info("从用户指令中解析出参数覆盖: %s", param_overrides)
@@ -172,9 +181,9 @@ class Workflow:
                 logger.info("Dry run 模式 — 跳过图像生成")
                 return result
 
-            # ---- 阶段 4: AI Horde 生成 + 下载 ----
+            # ---- 阶段 3: AI Horde 生成 + 下载 ----
             logger.info("-" * 40)
-            logger.info("阶段 4/4: AI Horde 图像生成")
+            logger.info("阶段 3/3: AI Horde 图像生成")
 
             task_id = self.horde.submit(prompt_data)
             result["task_id"] = task_id

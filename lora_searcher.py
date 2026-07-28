@@ -17,7 +17,7 @@ from urllib.error import URLError
 
 logger = logging.getLogger(__name__)
 
-# CivitAI 需要代理（国内被墙）
+# CivitAI 默认 API 地址（可通过 config.proxy_url 覆盖）
 _CIVITAI_API = "https://civitai.com/api/v1"
 
 
@@ -37,6 +37,15 @@ class LoraSearcher:
         self.review_limit = 5  # 最多送给 LLM 审核的候选数
         self.max_submit = config.get("lora_search", {}).get("max_loras", 2)  # 最终提交上限
         self._cache: dict[str, list] = {}  # query → 缓存的搜索结果
+
+        # CivitAI API 地址：优先使用代理 URL，否则直连
+        civitai_cfg = config.get("civitai", {})
+        proxy_url = civitai_cfg.get("proxy_url", "").strip()
+        if proxy_url:
+            self._api_base = proxy_url.rstrip("/")
+            logger.info("CivitAI 使用代理: %s", self._api_base)
+        else:
+            self._api_base = _CIVITAI_API
 
     # ------------------------------------------------------------------
     # 公共方法
@@ -88,7 +97,7 @@ class LoraSearcher:
             # 获取完整 metadata（用 curl 走代理，不用 civitai_client 的 urllib）
             try:
                 meta = self._http_get(
-                    f"{_CIVITAI_API}/model-versions/{version_id}",
+                    f"{self._api_base}/model-versions/{version_id}",
                     use_proxy=True,
                 )
             except Exception as e:
@@ -163,7 +172,7 @@ Output one term per line, nothing else. No numbering, no punctuation, no explana
                 logger.debug("缓存命中: %s", query[:30])
                 return self._cache[query]
 
-            url = f"{_CIVITAI_API}/models?query={quote(query)}&type=LORA&nsfw=true&limit={self.search_limit}"
+            url = f"{self._api_base}/models?query={quote(query)}&type=LORA&nsfw=true&limit={self.search_limit}"
             last_error = None
             for attempt in range(1, 4):
                 try:
@@ -204,27 +213,30 @@ Output one term per line, nothing else. No numbering, no punctuation, no explana
         return all_items
 
     def _http_get(self, url: str, use_proxy: bool = True) -> dict:
-        """发送 HTTP GET，默认走 SOCKS5 代理（CivitAI 国内被墙）。
-        
-        使用 curl --socks5 而非 Python urllib ProxyHandler，
-        因为 Python 的 socks5 代理在 Windows 上不稳定。
+        """发送 HTTP GET。优先用 urllib（低开销），SOCKS5 路径回退 curl。
+
+        若配置了 proxy_url 则直连（反代 URL 本身已是代理），
+        否则走 SOCKS5 代理（CivitAI 国内被墙）。
         """
+        has_proxy_url = self._api_base != _CIVITAI_API
+
+        # 路径 1: 反代 URL 或直连 → urllib（无子进程开销）
+        if has_proxy_url or not use_proxy:
+            req = Request(url, headers={"User-Agent": "AI-Horde-Workflow/1.0"})
+            try:
+                with urlopen(req, timeout=10) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
+            except Exception as e:
+                raise RuntimeError(f"urllib 请求失败: {url[:100]} — {e}")
+
+        # 路径 2: SOCKS5 代理 → curl fallback（urllib 不原生支持 SOCKS5）
         import subprocess
-        
-        if use_proxy:
-            cmd = [
-                "curl", "-s", "--max-time", "15",
-                "--socks5", "127.0.0.1:10808",
-                "-H", "User-Agent: AI-Horde-Workflow/1.0",
-                url,
-            ]
-        else:
-            cmd = [
-                "curl", "-s", "--max-time", "10",
-                "-H", "User-Agent: AI-Horde-Workflow/1.0",
-                url,
-            ]
-        
+        cmd = [
+            "curl", "-s", "--max-time", "15",
+            "--socks5", "127.0.0.1:10808",
+            "-H", "User-Agent: AI-Horde-Workflow/1.0",
+            url,
+        ]
         try:
             result = subprocess.run(cmd, capture_output=True, text=True,
                                     encoding="utf-8", errors="replace", timeout=20)

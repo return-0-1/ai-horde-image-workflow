@@ -231,14 +231,25 @@ class AIHordeClient:
                 logger.info("任务完成 → id=%s, 耗时=%.1fs", task_id, elapsed)
                 return status
 
+            # 自适应轮询间隔：根据队列位置动态调整
+            queue_pos = status.get("queue_position", 0)
+            processing = status.get("processing", 0)
+            if processing > 0 or queue_pos <= 1:
+                interval = 5    # 正在处理或即将处理，加速轮询
+            elif queue_pos > 20:
+                interval = 30   # 远在队尾，慢轮询
+            elif queue_pos > 5:
+                interval = 15   # 中等距离
+            else:
+                interval = 8    # queue_pos 2-5，适中
+
             if elapsed - last_log >= 30:
                 wait_time = status.get("wait_time", "?")
-                queue_pos = status.get("queue_position", "?")
-                logger.info("轮询中 → id=%s, queue_pos=%s, wait_time=%s, elapsed=%.0fs",
-                            task_id, queue_pos, wait_time, elapsed)
+                logger.info("轮询中 → id=%s, queue_pos=%s, wait_time=%s, elapsed=%.0fs, interval=%ds",
+                            task_id, queue_pos, wait_time, elapsed, interval)
                 last_log = elapsed
 
-            time.sleep(self.poll_interval)
+            time.sleep(interval)
 
     # ------------------------------------------------------------------
     # 内部 — 下载

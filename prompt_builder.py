@@ -59,6 +59,82 @@ class PromptBuilder:
         return {"scene": scene, "is_fabricated": is_fab}
 
     # ------------------------------------------------------------------
+    # 阶段 1+2 合并: 场景提取 + 提示词生成（一次 LLM 调用）
+    # ------------------------------------------------------------------
+
+    def build_prompt_from_user_text(self, user_text: str, loras: list,
+                                    user_prefs: Optional[dict] = None) -> dict:
+        """合并场景提取和提示词生成为一次 LLM 调用。
+
+        将原来的 2 次串行 LLM 调用（extract_scene + build_prompt）
+        合并为 1 次。LLM 内部完成：分析输入 → 提取场景 → 生成 prompt。
+
+        Args:
+            user_text:   用户原始输入文本。
+            loras:       匹配到的 LoRA 列表。
+            user_prefs:  用户额外偏好。
+
+        Returns:
+            {
+                "scene":         "...",   # 提取的场景（中文）
+                "is_fabricated": false,
+                "prompt":        "...",   # 英文正向提示词
+                "negative":      "...",
+                "chinese_note":  "...",
+                "model":         "...",
+                ...
+            }
+            LLM 失败时返回 None，调用方回退到两阶段模式。
+        """
+        system_prompt = self._build_combined_prompt(loras)
+
+        user_msg = f"请分析以下用户输入，提取场景并直接生成最终的英文提示词：\n\n{user_text}"
+        if user_prefs:
+            user_msg += f"\n\n用户额外要求：{json.dumps(user_prefs, ensure_ascii=False)}"
+
+        response = self.llm.chat(system_prompt, user_msg, json_mode=True)
+        logger.info("LLM 原始响应（合并模式，前500字符）: %s", response[:500])
+
+        result = self._parse_llm_json(response)
+        if result is None:
+            logger.warning("合并模式 LLM 未返回有效 JSON (len=%d)", len(response))
+            # 非 JSON 时尝试作为纯 prompt 使用
+            if response and response.strip():
+                return {
+                    "scene": user_text.strip()[:200],
+                    "is_fabricated": False,
+                    "prompt": response.strip(),
+                    "negative": "",
+                    "chinese_note": "（合并模式：LLM 返回非 JSON 文本，作为 prompt 使用）",
+                }
+            return None
+
+        # 提取 scene（在合并模式下 LLM 也会返回 scene 字段）
+        scene = result.get("scene", user_text.strip()[:200])
+        is_fab = result.get("is_fabricated", False)
+        logger.info("合并模式完成 → fabricated=%s, scene=%s...", is_fab, scene[:80])
+
+        # prompt 为空 → 回退
+        if not result.get("prompt", "").strip():
+            logger.warning("合并模式 prompt 为空，回退到两阶段模式")
+            return None
+
+        # 降级字段
+        result = self._ensure_fields(result, scene)
+
+        # 自动面部修复
+        if "facefixer_strength" not in result:
+            if self._has_face(result.get("prompt", ""), scene):
+                result["facefixer_strength"] = 0.6
+
+        # 合并默认参数
+        merged = self._merge_defaults(result, loras)
+        # 把 scene 信息也带上
+        merged["_scene"] = scene
+        merged["_is_fabricated"] = is_fab
+        return merged
+
+    # ------------------------------------------------------------------
     # 阶段 2: 提示词生成
     # ------------------------------------------------------------------
 
@@ -368,6 +444,47 @@ Focus on common SD quality issues AND scene-specific problems to avoid. Output O
 - 如果角色外貌信息不完整，使用合理的默认值补充（如黑色中长发、深色眼眸、日常便服）。
 - 不要直接生成英文 Prompt，只需要中文场景描述。"""
 
+    def _build_combined_prompt(self, loras: list) -> str:
+        """构建合并模式的系统提示词：场景提取 + 提示词生成。"""
+        template = self._load_template()
+        lora_context = self._format_lora_context(loras)
+
+        return f"""你是一个专业的AI绘画提示词工程师。
+
+## 第一阶段：场景分析
+1. 分析用户输入的文字（可能是小说片段、口述描述、角色介绍等）。
+2. 如果输入包含多个场景，只提取最后一个场景作为图像生成目标。
+3. 如果输入无明显场景，自行编造一个合理的动漫/漫画风格场景。
+4. 场景描述要具体：角色外貌、服饰、发型发色、动作姿态、环境背景、光影氛围、构图视角。
+
+---
+
+{template}
+
+---
+
+## 当前可用的 LoRA 信息
+{lora_context}
+
+---
+
+## 最终输出格式
+
+输出纯 JSON，包含以下 5 个字段：
+
+```json
+{{
+  "scene": "中文场景描述（角色、动作、环境、氛围）",
+  "is_fabricated": false,
+  "prompt": "完整英文正向提示词",
+  "negative": "完整英文负面提示词",
+  "chinese_note": "中文说明（动态→静态凝固点、权重分配、视角因果过滤）"
+}}
+```
+
+只输出上述 5 个字段的 JSON 对象，严禁添加 width/height/steps/model/seed 等其他字段。
+直接输出 JSON，不要任何前言后记，不要 markdown 代码块标记。"""
+
     def _format_lora_context(self, loras: list) -> str:
         """格式化 LoRA 信息供 LLM 参考。"""
         if not loras:
@@ -433,7 +550,7 @@ Focus on common SD quality issues AND scene-specific problems to avoid. Output O
                         return val
                 except (ValueError, TypeError):
                     pass
-            return int(d.get(key, 512))
+            return int(d.get(key, 1024))
 
         merged = {
             "prompt": result.get("prompt", ""),
