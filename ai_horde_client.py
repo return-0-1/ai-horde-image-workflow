@@ -63,6 +63,30 @@ def _get_opener():
     return opener
 
 
+def _get_openers():
+    """返回本次请求的 opener 尝试顺序。
+
+    设了代理时追加一个直连 opener 兜底：v2rayN 没启动 / 端口改了 / 代理被关闭时，
+    不至于整个生图功能瘫痪（连接被拒属于「请求未发出」，回退不会造成副作用）。
+    """
+    opener = _get_opener()
+    if _resolve_proxy_url():
+        return [opener, _no_proxy_opener]
+    return [opener]
+
+
+def _is_proxy_dead(err) -> bool:
+    """判断是「代理本身不可用」（v2rayN 没启动/端口变了），而非目标站点慢。
+
+    只在这种确定性场景下才让 POST 也回退直连 —— 连接被拒 = 请求根本没发出去。
+    """
+    reason = getattr(err, "reason", None)
+    if isinstance(reason, ConnectionRefusedError):
+        return True
+    text = f"{err} {reason or ''}".lower()
+    return "refused" in text or "10061" in text or "connect to proxy" in text
+
+
 def _read_horde_key() -> str:
     """直接从项目 .env 文件读取 AI_HORDE_API_KEY（load_dotenv 失效时的兜底）。"""
     import re as _re
@@ -403,30 +427,39 @@ class AIHordeClient:
         for attempt in range(1, attempts + 1):
             req = Request(url, data=data_bytes, headers=headers, method=method)
             delay = min(2 ** attempt, 30) + random.uniform(0, 1)
-            try:
-                with _get_opener().open(req, timeout=self.timeout) as resp:
-                    return json.loads(resp.read().decode("utf-8"))
+            openers = _get_openers()
 
-            except HTTPError as e:
-                last_err = e
-                if e.code not in retry_codes:
-                    logger.error("AI Horde API 请求失败 [%s %s]: HTTP %s", method, path, e.code)
-                    raise RuntimeError(f"AI Horde API 不可用: {e}") from e
-                # 429 优先遵循服务端 Retry-After
-                ra = e.headers.get("Retry-After") if e.headers else None
-                if ra:
-                    try:
-                        delay = max(delay, float(ra))
-                    except ValueError:
-                        pass
+            for oi, opener in enumerate(openers):
+                try:
+                    with opener.open(req, timeout=self.timeout) as resp:
+                        return json.loads(resp.read().decode("utf-8"))
 
-            except (URLError, TimeoutError, ConnectionError, OSError) as e:
-                last_err = e
-                if not safe:
-                    # POST 读到超时/断流时任务可能已创建，重试会重复提交并重复扣 kudos
-                    logger.error("AI Horde 请求结果未知 [%s %s]: %s → 不自动重试（避免重复提交）",
-                                 method, path, e)
-                    raise RuntimeError(f"AI Horde API 不可用: {e}") from e
+                except HTTPError as e:
+                    last_err = e
+                    if e.code not in retry_codes:
+                        logger.error("AI Horde API 请求失败 [%s %s]: HTTP %s", method, path, e.code)
+                        raise RuntimeError(f"AI Horde API 不可用: {e}") from e
+                    # 429 优先遵循服务端 Retry-After
+                    ra = e.headers.get("Retry-After") if e.headers else None
+                    if ra:
+                        try:
+                            delay = max(delay, float(ra))
+                        except ValueError:
+                            pass
+                    break  # HTTP 层错误不必换 opener 重试
+
+                except (URLError, TimeoutError, ConnectionError, OSError) as e:
+                    last_err = e
+                    # 代理不可用 → 换直连再试一次（GET 直接回退；POST 仅在能确认
+                    # 「请求未发出」的回退，避免重复提交重复扣 kudos）
+                    if oi + 1 < len(openers) and (safe or _is_proxy_dead(e)):
+                        logger.warning("代理请求失败 [%s %s]: %s → 改用直连重试（代理=%s）",
+                                       method, path, e, _resolve_proxy_url())
+                        continue
+                    if not safe:
+                        logger.error("AI Horde 请求结果未知 [%s %s]: %s → 不自动重试（避免重复提交）",
+                                     method, path, e)
+                        raise RuntimeError(f"AI Horde API 不可用: {e}") from e
 
             if attempt < attempts:
                 logger.warning("AI Horde 请求重试 %d/%d [%s %s]: %s → %.1fs 后重试",
