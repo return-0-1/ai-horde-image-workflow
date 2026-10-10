@@ -8,6 +8,8 @@ ai_horde:
   api_key: ""                            # 填写你的 AI Horde API Key，或设置环境变量 AI_HORDE_API_KEY
   poll_interval: 10                      # 轮询间隔（秒）
   max_wait: 300                          # 最大等待时间（秒），超时则放弃
+  timeout: 60                            # 单次 HTTP 请求超时（秒）；/status/models 等接口本身要 14-28s
+  max_retries: 4                         # 429/5xx/网络抖动的重试次数（GET 全重试；POST 仅 429/408，防重复提交）
 
 # --- CivitAI API 设置 ---
 civitai:

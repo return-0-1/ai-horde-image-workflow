@@ -218,6 +218,7 @@ lora_blacklist:
 - 搜索关键词过长导致零结果 → 拆分为并行短查询
 - Docker 容器相对路径漂移 → 输出目录改为绝对路径 `/AstrBot/data/output`
 - CivitAI 国内被墙无法搜索 → Cloudflare Pages Worker 反代（`workers.dev` 不可用，`pages.dev` 可用）
+- 直连 aihorde.net 丢包/IPv6 不通 → 支持读 `HTTPS_PROXY` 环境变量 + 429/5xx 退避重试 + 超时 30s→60s
 
 ## AstrBot 插件命令
 

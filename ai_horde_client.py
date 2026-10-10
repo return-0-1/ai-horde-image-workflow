@@ -13,17 +13,54 @@ import os
 import io
 import json
 import time
+import random
 import logging
 from datetime import datetime
 from typing import Optional
 from urllib.request import Request, urlopen, ProxyHandler, build_opener
-from urllib.error import URLError
-
-# 绕过系统代理直连 AI Horde API（避免 v2rayN 干扰认证）
-# 图片下载仍走系统代理（Cloudflare R2 国内可能被墙）
-_no_proxy_opener = build_opener(ProxyHandler({}))
+from urllib.error import URLError, HTTPError
 
 logger = logging.getLogger(__name__)
+
+# 请求超时 / 重试（可由 config.yaml 的 ai_horde.timeout / max_retries 覆盖）
+_DEFAULT_TIMEOUT = 60
+_DEFAULT_MAX_RETRIES = 4
+# 可重试的 HTTP 状态码：服务端明确拒绝，任务未创建 → 重试安全
+_RETRY_CODES_SAFE = (408, 429, 500, 502, 503, 504)   # GET / HEAD
+_RETRY_CODES_UNSAFE = (408, 429)                     # POST：仅这些可确认未落库
+_CLIENT_AGENT = "ai_horde_image_generate:1.0:https://github.com/return-0-1/ai-horde-image-workflow"
+
+# 默认直连 AI Horde API（历史上 v2rayN 的系统代理会干扰 apikey 认证）。
+# 但显式设置 HTTP(S)_PROXY / ALL_PROXY 环境变量（.env 中亦可）后，改走该代理：
+# 国内直连 Cloudflare 段丢包/RST 严重时（~20% 连接失败、IPv6 全挂），必须设置。
+_no_proxy_opener = build_opener(ProxyHandler({}))
+
+
+def _resolve_proxy_url() -> str:
+    """读取环境变量中的代理地址（.env 由 workflow.py 在导入前加载）。"""
+    for key in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy",
+                "ALL_PROXY", "all_proxy"):
+        val = os.environ.get(key, "").strip()
+        if val:
+            return val
+    return ""
+
+
+_opener_cache: dict = {}
+
+
+def _get_opener():
+    """按环境变量决定「直连」还是「走代理」（懒解析，确保 .env 已加载）。"""
+    proxy = _resolve_proxy_url()
+    opener = _opener_cache.get(proxy)
+    if opener is None:
+        if proxy:
+            logger.info("AI Horde API 请求走代理: %s", proxy)
+            opener = build_opener(ProxyHandler({"http": proxy, "https": proxy}))
+        else:
+            opener = _no_proxy_opener
+        _opener_cache[proxy] = opener
+    return opener
 
 
 def _read_horde_key() -> str:
@@ -52,6 +89,8 @@ class AIHordeClient:
         self.api_key = cfg.get("api_key") or os.environ.get("AI_HORDE_API_KEY", "") or _read_horde_key()
         self.poll_interval = cfg.get("poll_interval", 10)
         self.max_wait = cfg.get("max_wait", 300)
+        self.timeout = int(cfg.get("timeout", _DEFAULT_TIMEOUT))
+        self.max_retries = int(cfg.get("max_retries", _DEFAULT_MAX_RETRIES))
         self.defaults = config.get("defaults", {})
         self.output_cfg = config.get("output", {})
         self._submitted_ids: list[str] = []  # 追踪已提交的任务 ID
@@ -217,13 +256,27 @@ class AIHordeClient:
     def _poll(self, task_id: str) -> dict:
         start = time.time()
         last_log = start
+        consecutive_errors = 0
 
         while True:
             elapsed = time.time() - start
             if elapsed > self.max_wait:
                 raise TimeoutError(f"任务 {task_id} 超时（>{self.max_wait}s），请稍后手动查询")
 
-            status = self._get(f"/generate/status/{task_id}")
+            try:
+                status = self._get(f"/generate/status/{task_id}")
+                consecutive_errors = 0
+            except Exception as e:
+                # 任务已提交（kudos 已扣），轮询失败不应直接放弃整个工作流
+                consecutive_errors += 1
+                if consecutive_errors >= 5:
+                    logger.error("轮询连续失败 %d 次，放弃等待 → id=%s: %s",
+                                 consecutive_errors, task_id[:8], e)
+                    raise
+                logger.warning("轮询失败 %d/5（任务仍在 Horde 队列中，%ds 后重试）→ id=%s: %s",
+                               consecutive_errors, 30, task_id[:8], e)
+                time.sleep(30)
+                continue
 
             done = status.get("done", False)
             state = status.get("state", "")
@@ -281,30 +334,40 @@ class AIHordeClient:
             filepath = os.path.join(output_dir, f"{ts}_{model}_{seed}.png")
 
             logger.info("下载图片 → %s → %s", img_url[:80], filepath)
-            try:
-                req = Request(img_url, headers={"User-Agent": "AI-Horde-Workflow/1.0"})
-                with urlopen(req, timeout=60) as resp:
-                    data = resp.read()
-
-                # AI Horde 返回 WebP → 转 PNG（QQ highway 不支持 WebP）
+            data = None
+            for attempt in range(1, 4):
                 try:
-                    from PIL import Image as PILImage
-                    img = PILImage.open(io.BytesIO(data))
-                    if img.format == "WEBP":
-                        img = img.convert("RGB")
-                        img.save(filepath, "PNG")
-                        logger.info("WebP → PNG 转换完成 → %s", filepath)
+                    req = Request(img_url, headers={"User-Agent": "AI-Horde-Workflow/1.0"})
+                    with urlopen(req, timeout=self.timeout) as resp:
+                        data = resp.read()
+                    break
+                except (URLError, TimeoutError, OSError) as e:
+                    if attempt >= 3:
+                        logger.error("下载失败（已重试 2 次）→ %s: %s", img_url[:80], e)
                     else:
-                        with open(filepath, "wb") as f:
-                            f.write(data)
-                except ImportError:
+                        logger.warning("下载重试 %d/2 → %s: %s", attempt, img_url[:60], e)
+                        time.sleep(2 * attempt)
+
+            if data is None:
+                continue
+
+            # AI Horde 返回 WebP → 转 PNG（QQ highway 不支持 WebP）
+            try:
+                from PIL import Image as PILImage
+                img = PILImage.open(io.BytesIO(data))
+                if img.format == "WEBP":
+                    img = img.convert("RGB")
+                    img.save(filepath, "PNG")
+                    logger.info("WebP → PNG 转换完成 → %s", filepath)
+                else:
                     with open(filepath, "wb") as f:
                         f.write(data)
+            except ImportError:
+                with open(filepath, "wb") as f:
+                    f.write(data)
 
-                images.append(filepath)
-                logger.info("下载完成 → %s (%s)", filepath, gen.get("model"))
-            except URLError as e:
-                logger.error("下载失败 → %s: %s", img_url[:80], e)
+            images.append(filepath)
+            logger.info("下载完成 → %s (%s)", filepath, gen.get("model"))
 
         return images
 
@@ -323,6 +386,7 @@ class AIHordeClient:
         headers = {
             "Content-Type": "application/json",
             "User-Agent": "AI-Horde-Workflow/1.0",
+            "Client-Agent": _CLIENT_AGENT,
         }
         if self.api_key:
             headers["apikey"] = self.api_key
@@ -331,11 +395,44 @@ class AIHordeClient:
         if body is not None:
             data_bytes = json.dumps(body).encode("utf-8")
 
-        req = Request(url, data=data_bytes, headers=headers, method=method)
+        safe = method.upper() in ("GET", "HEAD")
+        retry_codes = _RETRY_CODES_SAFE if safe else _RETRY_CODES_UNSAFE
+        attempts = max(1, self.max_retries + 1)
+        last_err = None
 
-        try:
-            with _no_proxy_opener.open(req, timeout=30) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except URLError as e:
-            logger.error("AI Horde API 请求失败 [%s %s]: %s", method, path, e)
-            raise RuntimeError(f"AI Horde API 不可用: {e}") from e
+        for attempt in range(1, attempts + 1):
+            req = Request(url, data=data_bytes, headers=headers, method=method)
+            delay = min(2 ** attempt, 30) + random.uniform(0, 1)
+            try:
+                with _get_opener().open(req, timeout=self.timeout) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
+
+            except HTTPError as e:
+                last_err = e
+                if e.code not in retry_codes:
+                    logger.error("AI Horde API 请求失败 [%s %s]: HTTP %s", method, path, e.code)
+                    raise RuntimeError(f"AI Horde API 不可用: {e}") from e
+                # 429 优先遵循服务端 Retry-After
+                ra = e.headers.get("Retry-After") if e.headers else None
+                if ra:
+                    try:
+                        delay = max(delay, float(ra))
+                    except ValueError:
+                        pass
+
+            except (URLError, TimeoutError, ConnectionError, OSError) as e:
+                last_err = e
+                if not safe:
+                    # POST 读到超时/断流时任务可能已创建，重试会重复提交并重复扣 kudos
+                    logger.error("AI Horde 请求结果未知 [%s %s]: %s → 不自动重试（避免重复提交）",
+                                 method, path, e)
+                    raise RuntimeError(f"AI Horde API 不可用: {e}") from e
+
+            if attempt < attempts:
+                logger.warning("AI Horde 请求重试 %d/%d [%s %s]: %s → %.1fs 后重试",
+                               attempt, attempts - 1, method, path, last_err, delay)
+                time.sleep(delay)
+
+        logger.error("AI Horde API 请求失败（已重试 %d 次）[%s %s]: %s",
+                     attempts - 1, method, path, last_err)
+        raise RuntimeError(f"AI Horde API 不可用: {last_err}") from last_err

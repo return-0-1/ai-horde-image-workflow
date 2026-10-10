@@ -201,6 +201,37 @@ lora_whitelist: []      # LoRA 白名单
 **现象**: `SequenceMatcher` 比较中文场景和英文 LoRA 名，全部返回 0
 **修复**: 改用 LLM 提取的英文搜索词做相似度比较
 
+### 9. 直连 aihorde.net 劣化 → 提交/轮询必然失败 ← 2026-10 修复
+
+**现象**: 提示词生成一切正常，卡在阶段 3：
+- `POST /generate/async` → `TimeoutError: The read operation timed out`（旧代码 30s 超时）
+- 或提交成功后第一次 `GET /generate/status/{id}` 返回 `HTTP 429` → 整个工作流抛错退出（任务其实正在正常处理，kudos 已扣）
+- `--list-models` → `/status/models` 同样读超时崩溃
+
+**实测根因**（本机直连，无代理）:
+| 探测 | 结果 |
+|------|------|
+| `aihorde.net` 10 次 heartbeat | 2 次直接失败（HTTP 000） |
+| 强制 IPv4 ×6 | 2 次失败；TTFB 1.6-13.6s |
+| 强制 IPv6 ×3 | **3/3 全挂**（DNS 返回 AAAA 优先 → urllib 先试 IPv6 白等） |
+| `civitai-proxy pages.dev` | 通但 TTFB 0.8-10.6s |
+| 走 v2rayN `http://127.0.0.1:10809` | 全部 ~0.5s |
+
+**修复**:
+1. `ai_horde_client._get_opener()` — 设置 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` 环境变量（`.env` 亦可）时走该代理，未设置则保持旧的直连行为（历史原因：v2rayN 系统代理会干扰 apikey 认证）。opener 懒解析，确保 `.env` 已加载。
+2. `_request()` 重试：GET/HEAD 对 `408/429/5xx` 与网络抖动指数退避重试（默认 4 次，遵循 `Retry-After`）；**POST 只对 408/429 重试**，读到超时/断流视为"结果未知"，不重试以免重复提交重复扣 kudos。
+3. 超时 30s → `ai_horde.timeout`（默认 60s，`/status/models` 本身要 14-28s）。
+4. `_poll()` 允许轮询失败（连续 5 次才放弃），任务已扣 kudos 时不因一次 429 丢弃结果。
+5. `_download()` 下载失败重试 2 次。
+6. 补上 AI Horde 建议的 `Client-Agent` 请求头。
+
+> ⚠️ 若 v2rayN 只开「系统代理」不开 TUN，务必在 `.env` 里显式设 `HTTPS_PROXY=http://127.0.0.1:<HTTP入站端口>`（v2rayN 默认 10809）。
+
+### 10. POST 读超时后任务"失联"
+
+**现象**: 提交时读超时，任务可能已在 Horde 侧创建（kudos 已扣），本地却拿不到 task_id
+**应对**: 不自动重试（防重复提交）；用 `/排队`（`get_active_tasks()`）按任务列表找回，或看 workflow.log 中上一次"任务已提交"的 id。
+
 ---
 
 ## AI Horde API 参考
