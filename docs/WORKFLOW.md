@@ -232,6 +232,24 @@ lora_whitelist: []      # LoRA 白名单
 **现象**: 提交时读超时，任务可能已在 Horde 侧创建（kudos 已扣），本地却拿不到 task_id
 **应对**: 不自动重试（防重复提交）；用 `/排队`（`get_active_tasks()`）按任务列表找回，或看 workflow.log 中上一次"任务已提交"的 id。
 
+### 11. 容器路径写进 config.yaml → 每次 pull 都冲突 ← 2026-10 修复
+
+**现象**: 生产（Docker 内）需要 `/AstrBot/data/output` 这类绝对路径，直接改 `config.yaml` 后：
+- `git pull` 报 `Your local changes to the following files would be overwritten by merge: config.yaml`，拉不动
+- 用 `git update-index --skip-worktree config.yaml` 隐藏后，`git status` 看着是干净的，pull 照旧被拒 —— 偏离被藏起来，更难排查
+
+**修复**: 这些路径改为环境变量覆盖（`.env` 已被 gitignore），`workflow.py::_apply_env_overrides()` 实现：
+
+| 环境变量 | 覆盖配置项 |
+|------|------|
+| `OUTPUT_DIR` | `output.directory` |
+| `LOG_FILE` | `logging.file` |
+| `LOG_LEVEL` | `logging.level` |
+
+容器里 `.env` 写 `OUTPUT_DIR=/AstrBot/data/output`、`LOG_FILE=/AstrBot/data/workflow.log`，`config.yaml` 就能与仓库完全一致，pull 永久无冲突。
+
+> ⚠️ `.env.example` 里 `OUTPUT_DIR`/`LOG_LEVEL` 早就写了，但代码此前并未实现 —— 文档与实现脱节，排查时容易被误导。
+
 ---
 
 ## AI Horde API 参考

@@ -226,7 +226,34 @@ class Workflow:
         if not os.path.exists(path):
             raise FileNotFoundError(f"配置文件不存在: {path}")
         with open(path, "r", encoding="utf-8") as f:
-            return yaml.safe_load(f)
+            cfg = yaml.safe_load(f) or {}
+        self._apply_env_overrides(cfg)
+        return cfg
+
+    @staticmethod
+    def _apply_env_overrides(cfg: dict) -> None:
+        """用环境变量覆盖配置项（.env 优先）。
+
+        Docker 容器内的输出/日志路径与宿主不同。若把绝对路径写进 config.yaml，
+        每次 pull 都会冲突（只能靠 skip-worktree 藏起来，反而更难查）；
+        放进 .env（已被 gitignore）更合适。
+
+        支持: OUTPUT_DIR → output.directory
+              LOG_FILE   → logging.file
+              LOG_LEVEL  → logging.level
+        """
+        out_dir = os.environ.get("OUTPUT_DIR", "").strip()
+        log_file = os.environ.get("LOG_FILE", "").strip()
+        log_level = os.environ.get("LOG_LEVEL", "").strip()
+
+        if out_dir:
+            cfg.setdefault("output", {})["directory"] = out_dir
+        if log_file or log_level:
+            log_cfg = cfg.setdefault("logging", {})
+            if log_file:
+                log_cfg["file"] = log_file
+            if log_level:
+                log_cfg["level"] = log_level
 
     def _setup_logging(self):
         log_cfg = self.config.get("logging", {})
