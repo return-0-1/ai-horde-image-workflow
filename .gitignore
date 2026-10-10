@@ -26,6 +26,10 @@ output/*.png
 output/*.webp
 output/*.jpg
 output/*.jpeg
+output/**/*.png
+output/**/*.webp
+output/**/*.jpg
+output/**/*.jpeg
 
 # ============================================================
 # 日志

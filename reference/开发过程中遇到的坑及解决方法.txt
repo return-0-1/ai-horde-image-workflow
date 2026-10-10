@@ -44,13 +44,14 @@
 8. CivitAI API 超时
 问题：CivitAI 网站无法访问，导致 LoRA 元数据获取失败
 
-原因：网络限制或 API 限流
+原因：CivitAI 在国内 TCP 层被封锁（非 DNS 污染），直连无法建立连接。Cloudflare Workers 的 `workers.dev` 域名在国内同样被封，需使用 Pages 的 `pages.dev` 域名。
 
 解决方案：
+- 部署 Cloudflare Pages Worker (`_worker.js`) 作为 CivitAI API 反代
+- 项目代码通过 `config.yaml` 的 `civitai.proxy_url` 配置反代地址
+- 无 VPN 即可直连反代访问 CivitAI
 
-使用本地配置的 LoRA 信息
-添加错误处理，超时不影响核心功能
-教训：外部依赖需要有降级方案
+教训：Cloudflare 不同产品的域名在国内封锁状态不同（`workers.dev` ❌ vs `pages.dev` ✅）
 
 9. 轮询间隔设置
 问题：默认轮询间隔太短导致频繁请求

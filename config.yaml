@@ -83,6 +83,54 @@ lora_whitelist:
     model_id: "2346200"
     description: "单手掰开/片手でマンコを広げる V-shaped fingers — Illustrious, 2.7k downloads"
 
+  - name: "Ruby Rose - RWBY: Ice Queendom"
+    version_id: "761243"
+    keywords:
+      - "ruby rose"
+      - "rwby"
+      - "red hair"
+      - "multicolored hair"
+      - "short hair"
+      - "jacket"
+      - "goggles"
+      - "hat"
+      - "crescent rose"
+      - "cloak"
+      - "scythe"
+      - "hooded cloak"
+      - "ice queendom"
+    trigger_words:
+      - "ruby rose,short hair,red hair,multicolored hair,jacket,goggles,hat,goggles on head"
+    base_model: "SDXL"
+    strength_model: 0.8
+    strength_clip: 0.8
+    model_id: "680089"
+    description: "Ruby Rose - RWBY: Ice Queendom, Pony, 56MB, 263 downloads"
+
+  - name: "Ruby Rose - RWBY"
+    version_id: "2127980"
+    keywords:
+      - "ruby rose"
+      - "rwby"
+      - "red hair"
+      - "multicolored hair"
+      - "short hair"
+      - "scythe"
+      - "crescent rose"
+      - "cloak"
+      - "hood"
+      - "cape"
+      - "red cape"
+      - "holding scythe"
+      - "huge weapon"
+    trigger_words:
+      - "1girl,red hair,multicolored hair,two-tone hair,black hair,brown hair,short hair,gradient hair,grey eyes"
+    base_model: "SDXL"
+    strength_model: 0.8
+    strength_clip: 0.8
+    model_id: "1880073"
+    description: "Ruby Rose - RWBY, Illustrious, 325MB, 373 downloads"
+
 # --- LoRA 黑名单（AI Horde worker 下载失败的 LoRA） ---
 lora_blacklist:
   - version_id: "133229"

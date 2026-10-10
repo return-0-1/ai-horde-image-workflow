@@ -26,6 +26,12 @@ class CivitAIClient:
         self._cache: dict[str, dict] = {}      # model_id → metadata
         self._version_cache: dict[str, dict] = {}  # version_id → metadata
 
+        # 代理 URL：设置后所有请求走此反代，无需 SOCKS5
+        self._proxy_url = cfg.get("proxy_url", "").strip()
+        if self._proxy_url:
+            self.api_url = self._proxy_url.rstrip("/")
+            logger.info("CivitAI 客户端使用代理: %s", self.api_url)
+
     # ------------------------------------------------------------------
     # 公共方法
     # ------------------------------------------------------------------
@@ -110,6 +116,14 @@ class CivitAIClient:
         logger.debug("CivitAI 请求 → %s", url)
         req = Request(url, headers={"User-Agent": "AI-Horde-Workflow/1.0"})
 
+        # 若配置了反代 URL，直连即可（反代本身已是代理，不触发 curl fallback）
+        if self._proxy_url:
+            try:
+                with urlopen(req, timeout=min(self.timeout, 10)) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
+            except Exception as e:
+                raise RuntimeError(f"CivitAI 代理请求失败: {url} — {e}")
+
         # 直连（短超时，快速失败）
         try:
             with urlopen(req, timeout=min(self.timeout, 5)) as resp:
@@ -117,7 +131,7 @@ class CivitAIClient:
         except Exception as e:
             logger.debug("CivitAI 直连失败 → 尝试 curl 代理: %s", e)
 
-        # curl fallback
+        # curl fallback（通过 SOCKS5 代理）
         import subprocess
         try:
             result = subprocess.run(

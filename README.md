@@ -16,7 +16,7 @@
 ├── ai_horde_client.py       # AI Horde API（提交、轮询、下载）
 ├── civitai_client.py        # CivitAI API（LoRA 元数据获取，可选）
 ├── llm_client.py            # LLM 抽象层（OpenAI 兼容接口）
-├── config.yaml              # 用户配置文件（API Key、模型、LoRA 白名单）
+├── config.yaml              # 用户配置文件（API Key、模型、LoRA 白名单、代理）
 ├── .env.example             # 环境变量模板（复制为 .env 填入真实 Key）
 ├── prompt/
 │   └── prompt_template.txt  # 专业提示词工程师模板
@@ -170,9 +170,16 @@ lora_whitelist:
 
 ### 自动搜索（白名单无匹配时触发）
 
-`lora_searcher` 自动从 CivitAI 搜索 LoRA，经 LLM 审核后使用：
+`lora_searcher` 自动从 CivitAI 搜索 LoRA，经 LLM 审核后使用。
+**无需 VPN** — 通过 Cloudflare Pages 反代 (`civitai-proxy`) 在国内直连 CivitAI API。
+
+需要在 `config.yaml` 中配置：
 
 ```yaml
+civitai:
+  api_url: "https://civitai.com/api/v1"
+  proxy_url: "https://civitai-proxy-ex1.pages.dev/api/v1"  # 反代地址
+
 lora_search:
   max_results: 10             # 每个关键词搜索结果数
   max_loras: 2                # 最终提交 LoRA 数量上限
@@ -210,6 +217,7 @@ lora_blacklist:
 - CivitAI 搜索无 NSFW 结果 → `nsfw=true` 参数
 - 搜索关键词过长导致零结果 → 拆分为并行短查询
 - Docker 容器相对路径漂移 → 输出目录改为绝对路径 `/AstrBot/data/output`
+- CivitAI 国内被墙无法搜索 → Cloudflare Pages Worker 反代（`workers.dev` 不可用，`pages.dev` 可用）
 
 ## AstrBot 插件命令
 
