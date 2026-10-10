@@ -103,7 +103,7 @@ llm:
   provider: "deepseek"
   api_base: "https://api.deepseek.com/v1"
   api_key: ""           # 或环境变量 OPENAI_API_KEY
-  model: "deepseek-v4-pro"
+  model: "deepseek-flash"
 
 defaults:
   model: "WAI-NSFW-illustrious-SDXL"
