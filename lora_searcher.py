@@ -18,6 +18,8 @@ from difflib import SequenceMatcher
 from urllib.request import Request, urlopen
 from urllib.error import URLError
 
+import net
+
 logger = logging.getLogger(__name__)
 
 # CivitAI 默认 API 地址（可通过 config.proxy_url 覆盖）
@@ -267,30 +269,29 @@ Output one term per line, nothing else. No numbering, no punctuation, no explana
         return all_items
 
     def _http_get(self, url: str, use_proxy: bool = True) -> dict:
-        """发送 HTTP GET。优先用 urllib（低开销），SOCKS5 路径回退 curl。
+        """发送 HTTP GET。优先用 urllib（低开销），失败回退 curl。
 
-        若配置了 proxy_url 则直连（反代 URL 本身已是代理），
-        否则走 SOCKS5 代理（CivitAI 国内被墙）。
+        出网代理由 net.py 统一决定（WORKFLOW_PROXY）；
+        若配置了 proxy_url（反代）则直连反代即可。
         """
         has_proxy_url = self._api_base != _CIVITAI_API
 
-        # 路径 1: 反代 URL 或直连 → urllib（无子进程开销）
+        # 路径 1: 反代 URL 或直连 → urllib；代理不可用时自动回退直连
         if has_proxy_url or not use_proxy:
             req = Request(url, headers={"User-Agent": "AI-Horde-Workflow/1.0"})
             try:
-                with urlopen(req, timeout=10) as resp:
+                with net.open_with_fallback(req, timeout=10) as resp:
                     return json.loads(resp.read().decode("utf-8"))
             except Exception as e:
                 raise RuntimeError(f"urllib 请求失败: {url[:100]} — {e}")
 
-        # 路径 2: SOCKS5 代理 → curl fallback（urllib 不原生支持 SOCKS5）
+        # 路径 2: curl fallback（urllib 不原生支持 SOCKS5；有项目代理则用它）
         import subprocess
-        cmd = [
-            "curl", "-s", "--max-time", "15",
-            "--socks5", "127.0.0.1:10808",
-            "-H", "User-Agent: AI-Horde-Workflow/1.0",
-            url,
-        ]
+        proxy = net.resolve_proxy()
+        cmd = ["curl", "-s", "--max-time", "15",
+               "-H", "User-Agent: AI-Horde-Workflow/1.0"]
+        cmd += ["-x", proxy] if proxy else ["--socks5", "127.0.0.1:10808"]
+        cmd.append(url)
         try:
             result = subprocess.run(cmd, capture_output=True, text=True,
                                     encoding="utf-8", errors="replace", timeout=20)

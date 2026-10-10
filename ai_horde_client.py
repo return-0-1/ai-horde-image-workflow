@@ -17,8 +17,17 @@ import random
 import logging
 from datetime import datetime
 from typing import Optional
-from urllib.request import Request, urlopen, ProxyHandler, build_opener
+from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
+
+from net import (
+    resolve_proxy as _resolve_proxy_url,
+    get_opener as _get_opener,
+    get_openers as _get_openers,
+    is_proxy_dead as _is_proxy_dead,
+    no_proxy_opener as _no_proxy_opener,
+    open_with_fallback,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,61 +39,8 @@ _RETRY_CODES_SAFE = (408, 429, 500, 502, 503, 504)   # GET / HEAD
 _RETRY_CODES_UNSAFE = (408, 429)                     # POST：仅这些可确认未落库
 _CLIENT_AGENT = "ai_horde_image_generate:1.0:https://github.com/return-0-1/ai-horde-image-workflow"
 
-# 默认直连 AI Horde API（历史上 v2rayN 的系统代理会干扰 apikey 认证）。
-# 但显式设置 HTTP(S)_PROXY / ALL_PROXY 环境变量（.env 中亦可）后，改走该代理：
-# 国内直连 Cloudflare 段丢包/RST 严重时（~20% 连接失败、IPv6 全挂），必须设置。
-_no_proxy_opener = build_opener(ProxyHandler({}))
-
-
-def _resolve_proxy_url() -> str:
-    """读取环境变量中的代理地址（.env 由 workflow.py 在导入前加载）。"""
-    for key in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy",
-                "ALL_PROXY", "all_proxy"):
-        val = os.environ.get(key, "").strip()
-        if val:
-            return val
-    return ""
-
-
-_opener_cache: dict = {}
-
-
-def _get_opener():
-    """按环境变量决定「直连」还是「走代理」（懒解析，确保 .env 已加载）。"""
-    proxy = _resolve_proxy_url()
-    opener = _opener_cache.get(proxy)
-    if opener is None:
-        if proxy:
-            logger.info("AI Horde API 请求走代理: %s", proxy)
-            opener = build_opener(ProxyHandler({"http": proxy, "https": proxy}))
-        else:
-            opener = _no_proxy_opener
-        _opener_cache[proxy] = opener
-    return opener
-
-
-def _get_openers():
-    """返回本次请求的 opener 尝试顺序。
-
-    设了代理时追加一个直连 opener 兜底：v2rayN 没启动 / 端口改了 / 代理被关闭时，
-    不至于整个生图功能瘫痪（连接被拒属于「请求未发出」，回退不会造成副作用）。
-    """
-    opener = _get_opener()
-    if _resolve_proxy_url():
-        return [opener, _no_proxy_opener]
-    return [opener]
-
-
-def _is_proxy_dead(err) -> bool:
-    """判断是「代理本身不可用」（v2rayN 没启动/端口变了），而非目标站点慢。
-
-    只在这种确定性场景下才让 POST 也回退直连 —— 连接被拒 = 请求根本没发出去。
-    """
-    reason = getattr(err, "reason", None)
-    if isinstance(reason, ConnectionRefusedError):
-        return True
-    text = f"{err} {reason or ''}".lower()
-    return "refused" in text or "10061" in text or "connect to proxy" in text
+# 出网代理由 net.py 统一决定（WORKFLOW_PROXY > HTTP(S)_PROXY，见 net.py 说明）。
+# 直连与走代理的 opener、代理不可用时回退直连的逻辑都在那里。
 
 
 def _read_horde_key() -> str:
@@ -362,7 +318,7 @@ class AIHordeClient:
             for attempt in range(1, 4):
                 try:
                     req = Request(img_url, headers={"User-Agent": "AI-Horde-Workflow/1.0"})
-                    with urlopen(req, timeout=self.timeout) as resp:
+                    with open_with_fallback(req, timeout=self.timeout) as resp:
                         data = resp.read()
                     break
                 except (URLError, TimeoutError, OSError) as e:

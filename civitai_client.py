@@ -13,6 +13,8 @@ from typing import Optional
 from urllib.request import Request, urlopen
 from urllib.error import URLError
 
+import net
+
 logger = logging.getLogger(__name__)
 
 
@@ -116,29 +118,23 @@ class CivitAIClient:
         logger.debug("CivitAI 请求 → %s", url)
         req = Request(url, headers={"User-Agent": "AI-Horde-Workflow/1.0"})
 
-        # 若配置了反代 URL，直连即可（反代本身已是代理，不触发 curl fallback）
-        if self._proxy_url:
-            try:
-                with urlopen(req, timeout=min(self.timeout, 10)) as resp:
-                    return json.loads(resp.read().decode("utf-8"))
-            except Exception as e:
-                raise RuntimeError(f"CivitAI 代理请求失败: {url} — {e}")
-
-        # 直连（短超时，快速失败）
+        # 出网代理由 net.py 统一决定（WORKFLOW_PROXY）；代理不可用时自动回退直连
         try:
-            with urlopen(req, timeout=min(self.timeout, 5)) as resp:
+            with net.open_with_fallback(req, timeout=min(self.timeout, 10)) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except Exception as e:
-            logger.debug("CivitAI 直连失败 → 尝试 curl 代理: %s", e)
+            logger.debug("CivitAI 请求失败 → 尝试 curl 兜底: %s", e)
 
-        # curl fallback（通过 SOCKS5 代理）
+        # curl fallback（项目代理优先，否则沿用旧的 SOCKS5 兜底）
         import subprocess
+        proxy = net.resolve_proxy()
+        cmd = ["curl", "-s", "--max-time", str(self.timeout),
+               "-H", "User-Agent: AI-Horde-Workflow/1.0"]
+        cmd += ["-x", proxy] if proxy else ["--socks5", "127.0.0.1:10808"]
+        cmd.append(url)
         try:
             result = subprocess.run(
-                ["curl", "-s", "--max-time", str(self.timeout),
-                 "--socks5", "127.0.0.1:10808",
-                 "-H", "User-Agent: AI-Horde-Workflow/1.0", url],
-                capture_output=True, text=True, encoding="utf-8",
+                cmd, capture_output=True, text=True, encoding="utf-8",
                 errors="replace", timeout=self.timeout + 5,
             )
             if result.returncode == 0 and result.stdout.strip():

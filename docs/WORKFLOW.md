@@ -250,6 +250,31 @@ lora_whitelist: []      # LoRA 白名单
 
 > ⚠️ `.env.example` 里 `OUTPUT_DIR`/`LOG_LEVEL` 早就写了，但代码此前并未实现 —— 文档与实现脱节，排查时容易被误导。
 
+### 12. 出网代理必须由项目自己决定（不要依赖通用 HTTPS_PROXY） ← 2026-10 修复
+
+**背景**: 宿主 VPN（v2rayN）一开一关，项目行为跟着变；TUN 模式还会把 Docker 容器的流量一起劫持。
+
+**现象对照**（同一台机器）:
+| 宿主 VPN | AI Horde / CivitAI 反代 | QQ 图片发送（NapCat 容器） |
+|---|---|---|
+| TUN / 全局开启 | ✅ 正常（走隧道） | ❌ `highway upload error_code=96` |
+| 关闭 | ❌ 握手超时（GFW 干扰直连） | ✅ 正常（境内直连腾讯） |
+
+**修复**: 新增 `net.py`，出网代理只认项目自己的设置：
+
+| 优先级 | 变量 | 说明 |
+|---|---|---|
+| 1 | `WORKFLOW_PROXY` | 项目专用（`.env` 配置）；`none`/`off`/`direct` = 强制直连 |
+| 2 | `AI_HORDE_PROXY` | 兼容旧名 |
+| 3 | `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` | 仅兜底（会被 dotenv 写进整个进程环境，影响同进程其他程序） |
+
+- `ai_horde_client` / `civitai_client` / `lora_searcher` / 图片下载全部走 `net.py`，不再各自 `urlopen`
+- 代理不可用时自动回退直连（GET/下载，以及可确认「请求未发出」的 POST）
+- 容器内用 `WORKFLOW_PROXY=http://host.docker.internal:10809`，**只给本项目容器设**；
+  NapCat/NapCat 所在容器保持无代理，否则 highway 上传会被拒
+
+> 教训: 通用代理环境变量是"全局开关"，而这里需要的是"按容器/按程序粒度"的分流。
+
 ---
 
 ## AI Horde API 参考
