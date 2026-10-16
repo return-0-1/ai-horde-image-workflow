@@ -23,11 +23,13 @@ from urllib.error import URLError, HTTPError
 from net import (
     resolve_proxy as _resolve_proxy_url,
     get_opener as _get_opener,
-    get_openers as _get_openers,
+    get_openers as _get_openers,  # noqa: F401  （保留给外部/测试调用）
+    get_chain as _get_chain,
     is_proxy_dead as _is_proxy_dead,
     no_proxy_opener as _no_proxy_opener,
     open_with_fallback,
 )
+
 
 logger = logging.getLogger(__name__)
 
@@ -381,11 +383,14 @@ class AIHordeClient:
         last_err = None
 
         for attempt in range(1, attempts + 1):
-            req = Request(url, data=data_bytes, headers=headers, method=method)
             delay = min(2 ** attempt, 30) + random.uniform(0, 1)
-            openers = _get_openers()
+            # 候选链：可能是「多个代理候选 → 直连兜底」，带名字便于日志区分
+            chain = _get_chain()
 
-            for oi, opener in enumerate(openers):
+            for oi, (proxy, opener) in enumerate(chain):
+                # 每个 opener 一个新 Request：代理 opener 会就地改写 req.host
+                # （req.set_proxy），复用同一对象会让「改直连重试」仍然打到代理
+                req = Request(url, data=data_bytes, headers=headers, method=method)
                 try:
                     with opener.open(req, timeout=self.timeout) as resp:
                         return json.loads(resp.read().decode("utf-8"))
@@ -406,11 +411,13 @@ class AIHordeClient:
 
                 except (URLError, TimeoutError, ConnectionError, OSError) as e:
                     last_err = e
-                    # 代理不可用 → 换直连再试一次（GET 直接回退；POST 仅在能确认
-                    # 「请求未发出」的回退，避免重复提交重复扣 kudos）
-                    if oi + 1 < len(openers) and (safe or _is_proxy_dead(e)):
-                        logger.warning("代理请求失败 [%s %s]: %s → 改用直连重试（代理=%s）",
-                                       method, path, e, _resolve_proxy_url())
+                    # 候选不可用 → 换下一个候选（最后是直连）。GET 直接回退；
+                    # POST 仅在能确认「请求未发出」（连接被拒等）时回退，
+                    # 避免重复提交重复扣 kudos
+                    if oi + 1 < len(chain) and (safe or _is_proxy_dead(e)):
+                        nxt = chain[oi + 1][0] or "直连"
+                        logger.warning("出网候选 %s 失败 [%s %s]: %s → 改用 %s 重试",
+                                       proxy or "直连", method, path, e, nxt)
                         continue
                     if not safe:
                         logger.error("AI Horde 请求结果未知 [%s %s]: %s → 不自动重试（避免重复提交）",
