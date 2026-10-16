@@ -30,6 +30,7 @@ from net import (
     open_with_fallback,
 )
 
+from samplers import validate_sampler, DEFAULT_SAMPLER
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,30 @@ _CLIENT_AGENT = "ai_horde_image_generate:1.0:https://github.com/return-0-1/ai-ho
 
 # 出网代理由 net.py 统一决定（WORKFLOW_PROXY > HTTP(S)_PROXY，见 net.py 说明）。
 # 直连与走代理的 opener、代理不可用时回退直连的逻辑都在那里。
+
+
+def _http_error_detail(e) -> str:
+    """把 4xx/5xx 的响应体摘出来 —— Horde 的 400 只在 body 里说明原因。
+
+    没有这一步，日志里只有 "HTTP Error 400: Bad Request"，看不出是哪个参数不对
+    （实测案例：body 里写着 ``params.sampler_name ... is not one of [...]``）。
+    """
+    try:
+        raw = e.read().decode("utf-8", errors="replace")[:500].strip()
+    except Exception:
+        raw = ""
+    if not raw:
+        return ""
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return f" → {raw[:300]}"
+    if isinstance(payload, dict):
+        if payload.get("errors"):
+            return f" → {json.dumps(payload['errors'], ensure_ascii=False)[:300]}"
+        if payload.get("message"):
+            return f" → {str(payload['message'])[:300]}"
+    return f" → {raw[:300]}"
 
 
 def _read_horde_key() -> str:
@@ -199,7 +224,7 @@ class AIHordeClient:
         payload = {
             "prompt": params["prompt"],
             "params": {
-                "sampler_name": params.get("sampler", d.get("sampler", "k_euler")),
+                "sampler_name": validate_sampler(params.get("sampler") or d.get("sampler"), context="生成参数"),
                 "cfg_scale": float(params.get("cfg_scale", d.get("cfg_scale", 7.5))),
                 "height": int(params.get("height", d.get("height", 512))),
                 "width": int(params.get("width", d.get("width", 512))),
@@ -396,10 +421,11 @@ class AIHordeClient:
                         return json.loads(resp.read().decode("utf-8"))
 
                 except HTTPError as e:
+                    detail = _http_error_detail(e)
                     last_err = e
                     if e.code not in retry_codes:
-                        logger.error("AI Horde API 请求失败 [%s %s]: HTTP %s", method, path, e.code)
-                        raise RuntimeError(f"AI Horde API 不可用: {e}") from e
+                        logger.error("AI Horde API 请求失败 [%s %s]: HTTP %s%s", method, path, e.code, detail)
+                        raise RuntimeError(f"AI Horde API 不可用: HTTP {e.code}{detail}") from e
                     # 429 优先遵循服务端 Retry-After
                     ra = e.headers.get("Retry-After") if e.headers else None
                     if ra:

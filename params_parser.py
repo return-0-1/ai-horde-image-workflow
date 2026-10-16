@@ -14,6 +14,8 @@ import json
 import logging
 from typing import Optional
 
+from samplers import normalize_sampler, DEFAULT_SAMPLER
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -33,22 +35,22 @@ SAMPLER_ALIASES = {
     "dpm++ 2s a": "k_dpmpp_2s_a",
     "dpm++ sde": "k_dpmpp_sde",
     "dpm++ sde karras": "k_dpmpp_sde",
-    "dpm++ 2m sde": "k_dpmpp_2m_sde",
-    "dpm++ 3m sde": "k_dpmpp_3m_sde",
+    "dpm++ 2m sde": "dpmpp_2m_sde",
+    "dpm++ 3m sde": "dpmpp_3m_sde",
     "dpm adaptive": "k_dpm_adaptive",
     "dpm fast": "k_dpm_fast",
     # DDIM / PLMS
-    "ddim": "k_ddim",
-    "plms": "k_plms",
+    "ddim": "DDIM",
+    # plms / restart —— AI Horde 无此采样器，故意不映射（硬凑近似的只会出不对的图）
     # LMS
     "lms": "k_lms",
     "lms karras": "k_lms",
     # Heun
     "heun": "k_heun",
     # UniPC
-    "unipc": "k_unipc",
+    "unipc": "uni_pc",
     # 其他
-    "restart": "k_restart",
+    # restart 同上（无对应）；这些名字交给 samplers.normalize_sampler 兜底
 }
 
 # 尺寸关键词
@@ -144,6 +146,7 @@ def parse(user_text: str, llm_client=None) -> dict:
     if overrides:
         # 过滤不合理的尺寸值（SDXL 要求 >= 256 且为 64 的倍数）
         overrides = _validate_dims(overrides)
+        overrides = _validate_sampler(overrides)
         logger.info("参数覆盖: %s", json.dumps(overrides, ensure_ascii=False))
 
     return overrides
@@ -208,16 +211,18 @@ def _parse_sampler(text: str) -> dict:
 
     # 先精确匹配英文关键字
     # 模式: "采样器 k_euler" / "用 DPM++ 采样器" / "sampler euler_a"
-    m = re.search(r"(?:采样器|sampler)\s*[：:=]?\s*([a-zA-Z0-9_\+\s]+?)(?:\s|$|,|，)", text, re.IGNORECASE)
+    m = re.search(r"(?:采样器|sampler)\s*[：:=]?\s*([a-zA-Z0-9_\+\s]+)", text, re.IGNORECASE)
     if m:
-        raw = m.group(1).strip().lower()
-        # 尝试别名映射
-        for alias, canonical in SAMPLER_ALIASES.items():
-            if raw == alias or raw.replace(" ", "_") == canonical:
+        # 贪婪取到子句末尾（碰到中文/逗号自然断开），再逐段去掉多余尾巴，
+        # 这样 "Euler a" / "DPM++ 2M Karras" 这种多词名字不会被截成 "Euler"
+        parts = m.group(1).split()
+        while parts:
+            canonical = normalize_sampler(" ".join(parts))
+            if canonical:
                 return {"sampler": canonical}
-        # 直接匹配内部名
-        if raw.startswith("k_"):
-            return {"sampler": raw}
+            parts.pop()
+        if m.group(1).strip():
+            logger.warning("采样器 %r 不是 AI Horde 认可的名字，已忽略", m.group(1).strip())
 
     # 模糊匹配：在整段文本中找采样器别名
     for alias, canonical in sorted(SAMPLER_ALIASES.items(), key=lambda x: -len(x[0])):
@@ -231,6 +236,24 @@ def _parse_sampler(text: str) -> dict:
                 return {"sampler": canonical}
 
     return {}
+
+
+def _validate_sampler(overrides: dict) -> dict:
+    """最后一道闸：采样器必须是 AI Horde 认可的名字，否则丢掉（用回默认）。
+
+    不设这道闸的后果实测过：LLM 兜底写回 "DPM++ 2M Karras" 这种 A1111 写法，
+    原样发给 /generate/async 会被服务端 400 拒掉，整次出图白费。
+    """
+    if "sampler" not in overrides:
+        return overrides
+    canonical = normalize_sampler(overrides["sampler"])
+    if canonical:
+        overrides["sampler"] = canonical
+    else:
+        logger.warning("丢弃无法识别的采样器 %r（不是 AI Horde 认可的名字，改用默认 %s）",
+                       overrides["sampler"], DEFAULT_SAMPLER)
+        overrides.pop("sampler")
+    return overrides
 
 
 def _to_bool(val: str) -> bool:
