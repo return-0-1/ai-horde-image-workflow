@@ -179,7 +179,7 @@ Bad: "Wonder Woman", "Naruto", "Batman"
 
 Output one term per line, nothing else. No numbering, no punctuation, no explanations."""
         try:
-            response = self.llm.chat(system, f"Scene: {scene_text}")
+            response = self.llm.chat(system, f"Scene: {scene_text}", thinking=False)
             keywords = [line.strip().lower() for line in response.strip().split("\n") if line.strip()]
             keywords = keywords[:5]  # max 5 queries
             logger.info("LLM 提取查询词 (%d, 按优先级): %s", len(keywords), keywords)
@@ -414,7 +414,10 @@ Output one term per line, nothing else. No numbering, no punctuation, no explana
 每个候选都必须打分，只输出 JSON，不要其他内容。"""
 
         try:
-            response = self.llm.chat(system, cand_text, json_mode=True)
+            # thinking=False：评分是「照标准打标签」，不需要长思考。开启思考时
+            # reasoning 会与 JSON 答案共用 max_tokens，导致答案被截断（实测过一次
+            # 思考烧掉 3236/4096），json.loads 报 "Unterminated string"。
+            response = self.llm.chat(system, cand_text, json_mode=True, thinking=False)
             result = json.loads(response)
         except (json.JSONDecodeError, Exception) as e:
             logger.warning("LLM 审核解析失败: %s", e)

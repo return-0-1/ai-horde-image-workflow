@@ -27,6 +27,12 @@ llm:
   model: "deepseek-flash"
   temperature: 0.7
   max_tokens: 4096
+  # 思考模式（deepseek-flash / v4 默认开启）: enabled | disabled | 留空 = 不发送该字段（用服务端默认）
+  # 注意 reasoning 与最终答案**共用** max_tokens：实测一次思考吃掉 1900-3300 token，
+  # 答案只剩几百字符空间，被截断后 json.loads 报 "Unterminated string"。
+  # 结构化任务（LoRA 评分 / 查询词提取 / 参数提取）已在代码里显式传 thinking=False，
+  # 此处的值只影响提示词创作类调用（prompt_builder）。
+  thinking: ""
 
 # --- 默认生成参数 ---
 defaults:

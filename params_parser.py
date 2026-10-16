@@ -260,6 +260,13 @@ def _to_bool(val: str) -> bool:
     return val.lower() in ("true", "是", "开", "启用", "yes", "on", "1")
 
 
+# LLM 兜底允许写回的参数键（白名单，理由见 _llm_fallback）
+_ALLOWED_KEYS = {
+    "width", "height", "steps", "cfg_scale", "sampler",
+    "clip_skip", "karras", "hires_fix", "nsfw", "seed", "n", "model",
+}
+
+
 def _llm_fallback(text: str, llm_client) -> dict:
     """LLM 兜底：从复杂自然语言中提取参数。"""
     system = """你是一个参数提取器。从用户文本中提取图像生成参数。
@@ -272,10 +279,23 @@ def _llm_fallback(text: str, llm_client) -> dict:
 如果没有参数覆盖，输出 {}"""
 
     try:
-        response = llm_client.chat(system, text, json_mode=True)
-        return json.loads(response)
+        response = llm_client.chat(system, text, json_mode=True, thinking=False)
+        raw = json.loads(response)
     except Exception:
         return {}
+
+    if not isinstance(raw, dict):
+        logger.warning("LLM 兜底返回的不是 JSON 对象，已忽略: %r", raw)
+        return {}
+
+    # 只保留白名单内的键。弱模型（deepseek-flash 等）在 json_mode 下有时会把
+    # 请求体本身回显出来（实测返回 {"type": "json_object"}），不过滤就会把
+    # 这种垃圾键并进生成参数。
+    result = {k: v for k, v in raw.items() if k in _ALLOWED_KEYS}
+    dropped = sorted(set(raw) - set(result))
+    if dropped:
+        logger.warning("LLM 兜底返回了非参数键，已忽略: %s", dropped)
+    return result
 
 
 # ======================================================================
