@@ -176,30 +176,74 @@ class LoraSearcher:
     # 内部 — 关键词提取
     # ------------------------------------------------------------------
 
+    _LATIN_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9+#._-]{2,}")
+
+    def _latin_proper_nouns(self, text: str) -> list[str]:
+        """抽出场景里的拉丁专有名词（DeepSeek / Genshin / Miku / RWBY）。
+
+        LoRA 大多以 IP、品牌、角色名命名，而这类词恰恰是 LLM 提取查询词时最容易
+        被当成"噪声"删掉的。这里不依赖 LLM 单独保一份，保证它们一定会被搜到。
+        """
+        seen, out = set(), []
+        for tok in self._LATIN_TOKEN.findall(text or ""):
+            low = tok.lower().strip("._-")
+            if len(low) < 3 or low in self._GENERIC_WORDS or low in seen:
+                continue
+            seen.add(low)
+            out.append(low)
+        return out
+
+    def _fallback_queries(self, scene_text: str, proper: list[str]) -> list[str]:
+        """LLM 提取失败时的兜底：按标点切分，优先含拉丁字母的片段。
+
+        旧实现直接拿 scene_text[:40] 当查询词 —— 中文长句在 CivitAI 上几乎零命中，
+        而且 40 字截断经常正好把关键英文名截掉。
+        """
+        parts = [p.strip() for p in re.split(r"[，,。.；;、\n！!？?｜|]", scene_text or "")
+                 if p.strip()]
+        latin = [p[:40] for p in parts if re.search(r"[A-Za-z]{2,}", p)]
+        out = list(proper)
+        for p in latin:
+            if all(p.lower().find(q) < 0 and q not in p.lower() for q in proper):
+                out.append(p)
+        if not out:
+            out = [p[:40] for p in parts[:3]] or [(scene_text or "")[:40]]
+        return out[:5]
+
     def _extract_query(self, scene_text: str) -> list[str]:
         """从场景文本提取搜索关键词，按优先级排序（高→低）。
 
-        改进：引导 LLM 排除角色名称/名人等噪声词。
+        专有名词（IP / 品牌 / 角色名）无条件优先：CivitAI 的 LoRA 就是以这些名字命名的，
+        而 LLM 倾向把它们当"角色身份噪声"删掉，导致 "DeepSeek 拟人化少女" 只搜到
+        泛泛的 anime style。
         """
         system = """You are a keyword extractor for CivitAI LoRA search.
-From a scene description, extract 3-5 specific search terms.
-Each term should be ONE concept: an object (e.g. "twin tails"), an action ("spread pussy"), or a setting ("toilet stall").
-Rank by importance to the scene — the most critical visual element first.
+From a scene description, extract 3-6 specific search terms, ONE concept each:
+an object ("twin tails"), clothing ("black lace lingerie"), an action ("spread pussy"),
+a setting ("toilet stall"), or an art style ("flat anime").
 
-CRITICAL: Choose terms that describe VISUAL ELEMENTS, not character identities.
-Prefer generic descriptive terms over specific names.
-Good: "black hair", "school uniform", "cherry blossoms"
-Bad: "Wonder Woman", "Naruto", "Batman"
+ALWAYS include any proper noun / IP / brand / character name that appears in the scene,
+verbatim (e.g. "DeepSeek", "Genshin Impact", "Hatsune Miku", "RWBY") — LoRAs are usually
+named after them, so they are the highest-value queries. Only drop names of unrelated
+real people.
+
+Translate Chinese concepts into short ENGLISH terms: CivitAI search does not match
+Chinese sentences. Never emit a whole sentence.
 
 Output one term per line, nothing else. No numbering, no punctuation, no explanations."""
+        proper = self._latin_proper_nouns(scene_text)
         try:
             response = self.llm.chat(system, f"Scene: {scene_text}", thinking=False)
             keywords = [line.strip().lower() for line in response.strip().split("\n") if line.strip()]
-            keywords = keywords[:5]  # max 5 queries
-            logger.info("LLM 提取查询词 (%d, 按优先级): %s", len(keywords), keywords)
-            return keywords if keywords else [scene_text[:40]]
-        except Exception:
-            return [scene_text[:40]]
+            keywords = [k for k in keywords if k]
+            merged = proper + [k for k in keywords if k not in proper]
+            merged = merged[:6]  # max 6 queries
+            logger.info("LLM 提取查询词 (%d, 按优先级): %s", len(merged), merged)
+            return merged or proper or [scene_text[:40]]
+        except Exception as e:
+            fallback = self._fallback_queries(scene_text, proper)
+            logger.warning("查询词提取失败（%s）→ 规则切分兜底: %s", type(e).__name__, fallback)
+            return fallback
 
     # ------------------------------------------------------------------
     # 内部 — 文本相似度排序
