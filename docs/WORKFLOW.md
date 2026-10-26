@@ -330,3 +330,39 @@ lora_whitelist: []      # LoRA 白名单
 | AI Horde 无 LoRA 状态 | 任务完成不知 LoRA 是否加载 | 目前无解，只能看效果 |
 | CivitAI `baseModel` 过滤无效 | API 忽略该参数 | Python 预筛 `_base_compatible` |
 | CivitAI 国内被墙 | `workers.dev` 域名在国内被封 | 改用 Cloudflare Pages (`pages.dev`) + `_worker.js` 反代 |
+
+---
+
+## 画风护栏：LoRA 反噬主模型 ← 2026-10 修复
+
+**现象**（同一晚 8 次生成，逐张核对画面）：
+
+| 指令 | 挂载的 LoRA | 实际出图 |
+|------|------------|---------|
+| 黄色卡通小奶龙 | 644378 Cartoon Style XL (SDXL 1.0) 8/10 + 190859 Cute Doodle (SDXL 1.0) 7/10 | **龙消失**，变成蓝发双马尾动漫少女 |
+| 猫娘黑蕾丝内衣（肖像构图） | 3098101 + 1759116（均 Illustrious，0.8/0.8） | 内衣细节极准，但**画风变半写实韩系**，脸和猫耳被裁掉 |
+| 橙牛吉祥物（呆萌毛绒） | 1923164 Orange Bull (Illustrious) 9/10 | 主体对，但渲染成写实 3D，且出现不该有的解剖细节 |
+
+**三个根因**：
+
+1. `_base_compatible` 把 SDXL/Illustrious/Pony/NoobAI/Anima 视作互相兼容，Pony 与 SDXL 1.0 的 LoRA 全被放行（LLM 还给 7-8 分）
+2. LoRA 权重 0.8/0.8 硬编码，压过 prompt 里的主体词和 `anime style`
+3. negative 里只有画质词，没有任何抗写实词，对 LoRA 的写实倾向零阻力
+
+**修复**：
+
+| 项 | 位置 | 规则 |
+|----|------|------|
+| base 家族过滤 | `lora_searcher._base_compatible` | 同家族才放行：Illustrious 目标只收 Illustrious/NoobAI；Pony / SDXL 1.0 / Anima / SD1.5 一律排除；baseModel 缺失也排除 |
+| LoRA 权重上限 | `workflow._tune_loras` + `lora_search.strength_model/strength_clip` | 白名单与自动搜索统一压到 ≤ 0.5 / ≤ 0.45 |
+| 画风护栏 | `workflow._apply_style_guard` + `style_guard` 段 | negative 追加 `realistic, photorealistic, 3d render, CGI, semi-realistic, korean style, glossy plastic skin…`；`anime style` 自动加权到 1.25 |
+| 角色特化过滤 | `lora_searcher._is_character_lora` + `lora_search.reject_unrequested_characters` | 名字为“角色 - 作品”/括号/斜杠格式且含 ≥2 个专有名词、含 `oc/character/cosplay`、或触发词带 `1girl/1boy` 且名字非服装类 → 场景未点名即排除；场景点名则放行 |
+
+**同 seed A/B 实测**（1024×1024，k_euler_a，steps 25，seed 424242）：
+
+- A（原配置）：半写实韩系插画，几乎无线稿，皮肤连续渐变
+- B（改后）：动漫赛璐璐，清晰描边、平涂硬阴影、动漫大眼
+
+> 教训：动漫画风不是靠往 prompt 里堆 `anime style` 拿回来的，而是靠“别让 LoRA 抢画风”——降权重 + negative 护栏比加正向词有效得多。
+> 待观察：极端场景下皮肤高光仍偏油，需要时可再补 `specular highlight on skin`。
+
