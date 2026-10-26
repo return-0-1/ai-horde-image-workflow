@@ -51,6 +51,14 @@ defaults:
   slow_workers: true
   facefixer_strength: 0.0             # 面部修复强度（0.0-1.0，0=禁用）
 
+# --- 画风护栏（防止 LoRA 把主模型画风拖成写实/3DCG） ---
+# 实测：服装类 LoRA 0.8 权重会让 WAI-NSFW-illustrious 出半写实韩系画风，
+# prompt 里平铺的 "anime style, manga style" 压不住；negative 里只有画质词时无任何反作用力。
+style_guard:
+  enabled: true
+  negative: "realistic, photorealistic, 3d render, CGI, semi-realistic, semi realistic, korean style, glossy plastic skin, photo, photograph, skin pores, oily skin, wet skin, subsurface scattering, blender"
+  anime_weight: 1.25                  # prompt 含 "anime style" 时自动加权；0 = 不加权
+
 # --- LoRA 白名单（手动配置可用的 LoRA） ---
 # 每个条目必须包含：
 #   - name:            显示名称
@@ -68,6 +76,13 @@ lora_search:
   max_results: 10                        # 每个关键词搜索结果数
   max_loras: 2                           # 最终提交 LoRA 数量上限
   min_score: 3                           # LLM 审核最低通过分 (1-10)
+  # 权重上限：LoRA 权重过高会盖掉主体与主模型画风（实测 0.8 时动漫风被拖成半写实），
+  # 自动搜索与白名单条目在提交前都会被压到不超过这两个值
+  strength_model: 0.5
+  strength_clip: 0.45
+  # 角色特化 LoRA（复现某个具体人物/作品角色）默认拒绝：场景没点名它就只会污染主体。
+  # 判定基于「名字格式 + 专有名词」和触发词里的 1girl/1boy 标注；场景点名则放行。
+  reject_unrequested_characters: true
 
 lora_whitelist:
   - name: "spreading the pussy open with one hand"

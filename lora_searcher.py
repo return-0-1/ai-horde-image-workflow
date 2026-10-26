@@ -42,6 +42,14 @@ class LoraSearcher:
         self.review_limit = 15  # 最多送给 LLM 审核的候选数（从 5 提升）
         self.max_submit = config.get("lora_search", {}).get("max_loras", 2)  # 最终提交上限
         self.min_score = config.get("lora_search", {}).get("min_score", 3)  # 最低通过分 (1-10)
+        # 权重上限：LoRA 权重过高会盖掉 prompt 主体和主模型的画风（实测 0.8 时 prompt 里的
+        # "anime style" 与主体词被打包带走），自动搜索的 LoRA 一律按此下限强度提交
+        self.strength_model = float(config.get("lora_search", {}).get("strength_model", 0.5))
+        self.strength_clip = float(config.get("lora_search", {}).get("strength_clip", 0.45))
+        # 角色特化 LoRA（复现某个具体人物）默认不参与：场景没点名它，挂上去只会污染主体
+        self.reject_unrequested_characters = bool(
+            config.get("lora_search", {}).get("reject_unrequested_characters", True)
+        )
         self._cache: dict[str, list] = {}  # query → 缓存的搜索结果
 
         # CivitAI API 地址：优先使用代理 URL，否则直连
@@ -112,6 +120,12 @@ class LoraSearcher:
 
             lora_info = self._parse_candidate(item, meta, version_id)
             if lora_info and self._base_compatible(lora_info["base_model"], base_model):
+                # 角色特化 LoRA：场景没点名这个角色时直接排除。
+                # 名字字面相似 ≠ 能用在场景里（"Blue hair OC(test)" 靠 "blue hair" 命中，
+                # 挂到"DeepSeek 拟人化少女"上纯粹是污染）
+                if self.reject_unrequested_characters and self._is_character_lora(
+                        lora_info, scene_text, queries):
+                    continue
                 lora_info["_priority"] = item.get("_priority", 99)
                 candidates.append(lora_info)
 
@@ -305,23 +319,147 @@ Output one term per line, nothing else. No numbering, no punctuation, no explana
     # 内部 — 候选解析
     # ------------------------------------------------------------------
 
-    # SDXL 兼容的 base model 集合
-    _SDXL_COMPATIBLE = {
-        "sdxl", "sdxl 1.0", "illustrious", "pony", "noobai",
-        "animagine", "anima", "sdxl lightning",
+    # CivitAI baseModel 取值 → 家族。只有同家族（或同源 CLIP）才能混用：
+    #   Illustrious / NoobAI 同属 Illustrious 系；
+    #   Pony、SDXL 1.0、Anima、SD1.5 各自独立训练，跨家族加载会让画风被拖走或细节丢失
+    #   （实测：Pony 版服装 LoRA 挂到 Illustrious 上，服装细节没出来，画风被拉成半写实）
+    _BASE_FAMILY = {
+        "illustrious": {"illustrious", "noobai", "noobai xl", "illustrious xl", "illustrious xl 1.0"},
+        "pony": {"pony", "pony diffusion", "ponyxl", "pony diffusion v6 xl"},
+        "sdxl": {"sdxl", "sdxl 1.0", "sdxl lightning", "sdxl turbo"},
+        "sd15": {"sd 1.5", "sd1.5", "sd 1.5 inpainting"},
+        "flux": {"flux", "flux.1", "flux.1 dev", "flux.1 schnell"},
     }
 
+    def _family(self, base: str) -> str:
+        """把 baseModel 字符串归到家族；未知归 other。"""
+        b = (base or "").lower().strip()
+        for fam, names in self._BASE_FAMILY.items():
+            if b in names:
+                return fam
+        # 模糊匹配：如 "Illustrious XL v1.0" / "Pony Diffusion V6"
+        for fam, names in self._BASE_FAMILY.items():
+            if any(n in b for n in names if len(n) > 3):
+                return fam
+        if "illustrious" in b or "noobai" in b:
+            return "illustrious"
+        if "pony" in b:
+            return "pony"
+        if "sdxl" in b:
+            return "sdxl"
+        return "other"
+
     def _base_compatible(self, lo_base: str, target: str) -> bool:
-        """检查 LoRA 的 base model 是否与目标兼容。"""
-        lo_lower = lo_base.lower().strip()
-        target_lower = target.lower().strip()
-        # SDXL 目标接受 SDXL/Illustrious/Pony/NoobAI/Anima 等
-        if "sdxl" in target_lower or target_lower == "sdxl":
-            return lo_lower in self._SDXL_COMPATIBLE or "sdxl" in lo_lower
-        # SD1.5 目标只接受 SD1.5/Other
-        if "sd1.5" in target_lower or "sd 1.5" in target_lower:
-            return lo_lower in {"sd 1.5", "sd1.5", "other"}
-        # 其他情况宽松处理
+        """LoRA 的 base 是否可挂到目标主模型上（同家族才放行）。"""
+        lo_fam = self._family(lo_base)
+        tgt_fam = self._family(target)
+        if lo_fam == "other":
+            # 元数据缺 baseModel 时不赌：跨基座硬挂的代价比少挂一个 LoRA 大得多
+            return False
+        if lo_fam == tgt_fam:
+            return True
+        # SDXL 主模型可接受 Illustrious/NoobAI（同源 CLIP，衍生关系）
+        if tgt_fam == "sdxl" and lo_fam == "illustrious":
+            return True
+        return False
+
+    # 名字里出现即视为“通用描述词”（小写）。这些词不构成专有名词。
+    _GENERIC_WORDS = {
+        "lora", "loha", "locon", "lycoris", "style", "styles", "styled", "anime", "manga",
+        "cartoon", "illustrious", "noobai", "pony", "ponyxl", "sdxl", "xl", "sd15", "flux",
+        "test", "beta", "alpha", "wip", "final", "nsfw", "sfw", "concept", "clothing",
+        "clothes", "outfit", "outfits", "pose", "poses", "position", "positions", "action",
+        "actions", "expression", "expressions", "gesture", "lingerie", "underwear",
+        "innerwear", "bra", "panties", "lace", "harness", "garter", "stockings", "dress",
+        "skirt", "uniform", "tactical", "armor", "armour", "weapon", "weapons", "background",
+        "scene", "lighting", "detail", "detailed", "realistic", "photo", "photography",
+        "photorealistic", "portrait", "camera", "angle", "view", "viewpoint", "perspective",
+        "quality", "enhancer", "slider", "helper", "tool", "utility", "bonus", "pack", "set",
+        "collection", "series", "art", "artstyle", "illustration", "painting", "watercolor",
+        "sketch", "lineart", "flat", "color", "colors", "colour", "shading", "rendering",
+        "3d", "2d", "cgi", "cg", "pixel", "pixelart", "ai", "the", "of", "and", "for",
+        "with", "by", "in", "on", "dark", "light", "black", "white", "red", "blue", "green",
+        "yellow", "pink", "purple", "brown", "grey", "gray", "orange", "midnight", "night", "day",
+        "sunset", "dawn", "moon", "moonlight", "glow", "glossy", "shiny", "soft", "hard",
+        "cute", "sexy", "hot", "casual", "formal", "summer", "winter", "spring", "autumn",
+        "festival", "party", "wedding", "school", "office", "gym", "sport", "swim",
+        "swimsuit", "bikini", "nightwear", "sleepwear", "pajamas", "maid", "nurse", "bunny",
+        "cat", "dog", "fox", "wolf", "dragon", "angel", "demon", "succubus", "elf", "ghost",
+        "monster", "giant", "small", "big", "huge", "long", "short", "hair", "eyes", "eye",
+        "face", "body", "skin", "female", "male", "girl", "boy", "woman", "man", "adult",
+        "young", "mature", "slim", "thick", "chubby", "muscular", "tall", "solo", "duo",
+        "group", "full", "half", "upper", "lower", "close", "wide", "shot", "front", "rear",
+        "side", "top", "bottom", "left", "right", "v1", "v2", "v3", "v4", "v5", "version",
+        "pdxl", "ilxl", "xl", "pony", "il", "gba", "hd", "4k", "8k",
+        # 身体部位 / 性行为 / 常见姿态词：这些出现在名字里同样不算“专有名词”，
+        # 否则 "Self Pussy Spread (pose)" 一类的姿势 LoRA 会被当成角色
+        "self", "spread", "spreading", "spreaded", "open", "closed", "anal", "sex", "sexual",
+        "nude", "naked", "breast", "breasts", "boobs", "ass", "thigh", "thighs", "leg", "legs",
+        "arm", "arms", "hand", "hands", "finger", "fingers", "cum", "penetration",
+        "masturbation", "fingering", "oral", "kiss", "kissing", "standing", "sitting",
+        "lying", "kneeling", "bent", "holding", "grip", "hips", "torso", "waist", "chest",
+        "nipple", "nipples", "genital", "genitals", "pussy", "penis", "pov", "view", "crop",
+        "closeup", "close-up", "fullbody", "full-body", "halfbody", "upperbody", "lowerbody",
+        "frontview", "rearview", "sideview", "from", "behind", "above", "below",
+    }
+
+    # 触发词里出现这些身份标注 → 该 LoRA 是训练来复现某个具体人物的
+    _CHARACTER_MARKERS = ("1girl", "1boy", "1other", "character sheet")
+
+    # 名字里的专有名词达到这个数量才判定为角色/作品特化（单个大写词太容易是描述词）
+    _CHARACTER_PROPER_NOUN_MIN = 2
+
+    def _proper_nouns(self, name: str) -> set[str]:
+        """提取模型名里像“专有名词”的词（角色名/作品名）。"""
+        out = set()
+        for t in re.findall(r"[A-Za-z0-9][A-Za-z0-9'’.\-]*", name or ""):
+            low = t.lower().strip(".-'’")
+            if len(low) < 3 or low in self._GENERIC_WORDS:
+                continue
+            if t[0].isupper():
+                out.add(low)
+        return out
+
+    def _is_character_lora(self, lora: dict, scene_text: str,
+                           queries: list[str]) -> bool:
+        """是否“复现某个具体人物”的 LoRA，且场景没有点名它。
+
+        名字字面相似不等于能用：`Blue hair OC(test)` 靠 "blue hair" 命中一个
+        "DeepSeek 拟人化少女" 的场景，挂上去只会污染主体。判定后若场景/检索词里
+        出现该角色名，则视为用户点名，放行。
+        """
+        name = lora.get("name", "") or ""
+        name_low = name.lower()
+        triggers = " ".join((lora.get("trigger_words") or [])[:2]).lower()
+
+        names = self._proper_nouns(name)
+        is_char = False
+
+        # R1: 有“角色 - 作品”或括号/斜杠格式，且含 ≥2 个专有名词
+        #     （Ruby Rose - RWBY / Ludmilla (Bardock…) / Alice Lenaford/アニス… - Dark Bl）
+        #     单独一个专有名词太容易是描述词（Orange Bull / Self Pussy Spread (pose)），不判
+        if re.search(r"\s-\s|\(|/", name) and len(names) >= self._CHARACTER_PROPER_NOUN_MIN:
+            is_char = True
+        # R2: 显式标签
+        if not is_char and re.search(r"\b(oc|character|cosplay)\b", name_low):
+            is_char = True
+        # R3: 触发词以人物标注开头，且名字不是服装/姿势/风格类
+        if not is_char and any(m in triggers for m in self._CHARACTER_MARKERS):
+            if not re.search(r"(style|clothing|outfit|pose|position|lingerie|underwear|"
+                             r"uniform|armor|armour|weapon)", name_low):
+                is_char = True
+
+        if not is_char:
+            return False
+
+        # 豁免：场景或检索词里点名了这个角色
+        blob = f"{scene_text} {' '.join(queries)}".lower()
+        hit = sorted(w for w in names if w and w in blob)
+        if hit:
+            logger.info("角色 LoRA 被场景点名，放行: %s（命中 %s）", name[:40], hit)
+            return False
+        logger.info("跳过角色特化 LoRA [%s] %s（场景未点名）",
+                    lora.get("version_id", "?"), name[:50])
         return True
 
     def _parse_candidate(self, item: dict, meta: dict, version_id: str) -> Optional[dict]:
@@ -340,8 +478,8 @@ Output one term per line, nothing else. No numbering, no punctuation, no explana
             "keywords": [kw.lower() for kw in keywords],
             "trigger_words": trained_words if trained_words else [],
             "base_model": base_model,
-            "strength_model": 0.8,
-            "strength_clip": 0.8,
+            "strength_model": self.strength_model,
+            "strength_clip": self.strength_clip,
             "description": model_name,
         }
 
@@ -395,7 +533,7 @@ Output one term per line, nothing else. No numbering, no punctuation, no explana
         system = f"""你是一个 AI 绘画 LoRA 评分助手。根据以下条件为每个候选 LoRA 打分：
 
 目标场景: {scene_text[:200]}
-目标基础模型: {base_model}（SDXL/Illustrious/Pony/NoobAI 都视为兼容）
+目标基础模型: {base_model}（只有同家族 base 的 LoRA 才会入选；跨基座加载会拖走画风）
 
 评分标准 (1-10 分):
 - 9-10: 完美匹配，LoRA 主题与场景高度相关，触发词可直接增强画面
@@ -406,7 +544,9 @@ Output one term per line, nothing else. No numbering, no punctuation, no explana
 
 注意：
 - 角色特化 LoRA（如 "Wonder Girl"、"Batman" 等）若与场景无关，给 1-2 分
-- 风格/质感 LoRA（如 "watercolor style"、"detail enhancer"）可给 5-7 分
+- 风格/质感 LoRA（如 "watercolor style"、"detail enhancer"）只有在场景明确要那种画风时
+  才给 7 分以上；场景是动漫/插画时，写实、3DCG、摄影类风格 LoRA 给 2-3 分
+- 场景里已有明确主体（动物/角色/物体）时，会改变画风的风格 LoRA 要扣分，避免主体被覆盖
 - 即使没有完美匹配，也要认真评估每个候选，给合理的分数
 
 输出 JSON：

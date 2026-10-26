@@ -119,13 +119,15 @@ class Workflow:
                 try:
                     searched_loras = self.lora_searcher.search(
                         user_text,
-                        base_model="SDXL",
+                        base_model=self.base_model,
                         blacklist_model_ids=blacklist_ids,
                     )
                 except Exception as e:
                     logger.warning("LoRA 搜索失败（回退白名单）: %s", e)
 
             loras = loras + searched_loras
+            # 权重上限保护（白名单与自动搜索统一生效）
+            loras = self._tune_loras(loras)
 
             # 用 CivitAI 增强（失败不影响）
             enriched_loras = []
@@ -171,6 +173,9 @@ class Workflow:
                 "model", prompt_data["model"]
             )
 
+            # 画风护栏：negative 追加抗写实词 + 风格词加权
+            prompt_data = self._apply_style_guard(prompt_data)
+
             result["prompt_data"] = prompt_data
             logger.info("Prompt 生成完成 → model=%s, size=%dx%d",
                         prompt_data["model"], prompt_data["width"], prompt_data["height"])
@@ -205,6 +210,63 @@ class Workflow:
             result["error"] = str(e)
 
         return result
+
+    # ------------------------------------------------------------------
+    # 内部 — 画风护栏
+    # ------------------------------------------------------------------
+
+    def _tune_loras(self, loras: list[dict]) -> list[dict]:
+        """统一压低 LoRA 权重（白名单与自动搜索都生效）。
+
+        LoRA 权重过高会同时盖掉两样东西：prompt 里的主体（黄小奶龙 → 动漫少女）
+        和主模型自带的动漫画风（Illustrious 被服装 LoRA 拖成半写实）。
+        上限由 `lora_search.strength_model / strength_clip` 控制。
+        """
+        lora_cfg = self.config.get("lora_search", {})
+        cap_m = float(lora_cfg.get("strength_model", 0.5))
+        cap_c = float(lora_cfg.get("strength_clip", 0.45))
+
+        tuned = []
+        for lo in loras:
+            lo = dict(lo)
+            m = float(lo.get("strength_model", cap_m))
+            c = float(lo.get("strength_clip", cap_c))
+            m2, c2 = min(m, cap_m), min(c, cap_c)
+            if (m, c) != (m2, c2):
+                logger.info("LoRA 权重下调 [%s] %.2f/%.2f → %.2f/%.2f（上限保护）",
+                            lo.get("name", "?"), m, c, m2, c2)
+            lo["strength_model"], lo["strength_clip"] = m2, c2
+            tuned.append(lo)
+        return tuned
+
+    def _apply_style_guard(self, prompt_data: dict) -> dict:
+        """把画风护栏加进 negative，并给动漫风格词加权。
+
+        原因:negative 只有画质词时，LoRA 带来的写实/3DCG 倾向没有任何反作用力，
+        prompt 里平铺的 "anime style, manga style, 2D illustration" 压不住 0.8 权重的 LoRA。
+        由 config.yaml 的 `style_guard` 段控制。
+        """
+        guard = self.config.get("style_guard", {})
+        if not guard.get("enabled", True):
+            return prompt_data
+
+        extra = (guard.get("negative") or "").strip()
+        neg = prompt_data.get("negative") or ""
+        if extra:
+            existing = {t.strip().lower() for t in neg.split(",") if t.strip()}
+            add = [t.strip() for t in extra.split(",")
+                   if t.strip() and t.strip().lower() not in existing]
+            if add:
+                prompt_data["negative"] = (", ".join([neg] + add) if neg.strip()
+                                           else ", ".join(add))
+                logger.info("画风护栏 → negative 追加 %d 项: %s", len(add), ", ".join(add))
+
+        weight = float(guard.get("anime_weight", 0) or 0)
+        prompt = prompt_data.get("prompt") or ""
+        if weight > 0 and "anime style" in prompt and "(anime style" not in prompt:
+            prompt_data["prompt"] = prompt.replace("anime style", f"(anime style:{weight})", 1)
+            logger.info("画风护栏 → anime style 加权至 %s", weight)
+        return prompt_data
 
     # ------------------------------------------------------------------
     # 公共 — 查看模型 & LoRA

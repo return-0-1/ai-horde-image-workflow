@@ -101,8 +101,8 @@ class LoraManager:
             "keywords": [kw.lower() for kw in lora_info.get("keywords", [])],
             "trigger_words": lora_info.get("trigger_words", []),
             "base_model": lora_info.get("base_model", "SDXL"),
-            "strength_model": lora_info.get("strength_model", 0.8),
-            "strength_clip": lora_info.get("strength_clip", 0.8),
+            "strength_model": lora_info.get("strength_model", 0.5),
+            "strength_clip": lora_info.get("strength_clip", 0.45),
             "description": lora_info.get("description", ""),
         }
         self._loras.append(entry)
