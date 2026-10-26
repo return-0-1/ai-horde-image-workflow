@@ -134,10 +134,11 @@ class LoraSearcher:
             return []
 
         # 3.5 文本相似度预排序：用英文搜索词代替中文场景做比较
-        candidates = self._rank_by_similarity(candidates, queries)
+        proper = self._latin_proper_nouns(scene_text)
+        candidates = self._rank_by_similarity(candidates, queries, proper)
 
-        # 限制候选数量（扩大到 15）
-        candidates = candidates[:self.review_limit]
+        # 截断候选时保送“名字命中专有名词”的结果
+        candidates = self._pick_review_candidates(candidates)
         logger.info("候选 LoRA (%d 个，相似度排序后): %s", len(candidates),
                     [(c["version_id"], c["name"][:35], round(c.get("_sim", 0), 2))
                      for c in candidates])
@@ -249,15 +250,19 @@ Output one term per line, nothing else. No numbering, no punctuation, no explana
     # 内部 — 文本相似度排序
     # ------------------------------------------------------------------
 
-    def _rank_by_similarity(self, candidates: list[dict], queries: list[str]) -> list[dict]:
+    def _rank_by_similarity(self, candidates: list[dict], queries: list[str],
+                            proper: Optional[list[str]] = None) -> list[dict]:
         """用搜索词-名称文本相似度对候选重新排序。
 
         把名称与搜索关键词更匹配的候选推到前面，
         减少角色特化 LoRA 因热度高而占位的问题。
         queries: 英文搜索关键词列表（由 _extract_query 产生）。
+        proper:  场景里的专有名词（DeepSeek / RWBY…），命中名称的候选额外加权 ——
+                 这类名字常含中文或符号，纯文本相似度天然吃亏（"deepseek娘-小鲸鱼" vs
+                 英文 query 只有 0.22，会被泛泛的 "Anime ink illustration" 挤掉）。
         """
-        # 合并所有搜索词为比较文本
         query_text = " ".join(queries).lower()
+        proper_lower = [p.lower() for p in (proper or []) if p]
         for c in candidates:
             name_lower = c.get("name", "").lower()
             # 序列相似度
@@ -267,9 +272,28 @@ Output one term per line, nothing else. No numbering, no punctuation, no explana
             query_words = set(query_text.split())
             overlap = len(name_words & query_words)
             c["_sim"] = sim + overlap * 0.2  # 每个重叠词 +0.2
+            # 专有名词直接出现在名字里 → 加权（最高价值的信号）
+            c["_named_hit"] = bool(proper_lower) and any(p in name_lower for p in proper_lower)
+            if c["_named_hit"]:
+                c["_sim"] += 0.5
         # 按 _sim 降序排序
         candidates.sort(key=lambda c: c.get("_sim", 0), reverse=True)
         return candidates
+
+    def _pick_review_candidates(self, candidates: list[dict], per_named: int = 3) -> list[dict]:
+        """截断到 review_limit，但保送名字命中专有名词的候选（最多 per_named 个）。"""
+        if len(candidates) <= self.review_limit:
+            return candidates
+        named = [c for c in candidates if c.get("_named_hit")][:per_named]
+        if not named:
+            return candidates[:self.review_limit]
+        named_ids = {id(c) for c in named}
+        rest = [c for c in candidates if id(c) not in named_ids]
+        kept = named + rest[:max(0, self.review_limit - len(named))]
+        logger.info("候选截断 %d → %d（保送 %d 个专有名词命中: %s）",
+                    len(candidates), len(kept), len(named),
+                    [c["name"][:30] for c in named])
+        return kept
 
     # ------------------------------------------------------------------
     # 内部 — CivitAI 搜索
