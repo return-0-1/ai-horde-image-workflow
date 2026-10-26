@@ -435,13 +435,15 @@ Focus on common SD quality issues AND scene-specific problems to avoid. Output O
 
 1. 分析用户输入的文字（可能是小说片段、口述描述、角色介绍等）。
 2. 如果输入包含多个场景，只提取**最后一个场景**作为图像生成目标。
-3. 如果输入无明显场景，由你**自行编造一个合理的动漫/漫画风格场景**（包含角色外貌、动作、环境等关键元素）。
+3. 只有当输入完全没有可画的内容（寒暄、提问、闲聊）时，才自行编造一个合理的动漫/漫画风格场景，
+   并把 is_fabricated 置为 true；只要用户描述了画面，is_fabricated 必须是 false。
 4. 输出格式必须是 JSON：
    {"scene": "场景描述（中文，包含角色、动作、环境、氛围）", "is_fabricated": true/false}
 
 重要：
-- 场景描述要具体，包含角色外貌、服饰、发型发色、动作姿态、环境背景、光影氛围、构图视角等关键维度。
-- 如果角色外貌信息不完整，使用合理的默认值补充（如黑色中长发、深色眼眸、日常便服）。
+- **禁止扩写**：只保留用户明确提到或必然蕴含的元素；不要新增服饰部件、配饰、道具、背景元素、角色数量。
+  允许补全的只有纯表现形式：镜头视角、景别、光照方向、构图。
+- 用户要求"简洁/不要太多描述/别加细节"时，scene 压到一句话（主体 + 用户提到的关键特征）。
 - 不要直接生成英文 Prompt，只需要中文场景描述。"""
 
     def _build_combined_prompt(self, loras: list) -> str:
@@ -454,8 +456,13 @@ Focus on common SD quality issues AND scene-specific problems to avoid. Output O
 ## 第一阶段：场景分析
 1. 分析用户输入的文字（可能是小说片段、口述描述、角色介绍等）。
 2. 如果输入包含多个场景，只提取最后一个场景作为图像生成目标。
-3. 如果输入无明显场景，自行编造一个合理的动漫/漫画风格场景。
-4. 场景描述要具体：角色外貌、服饰、发型发色、动作姿态、环境背景、光影氛围、构图视角。
+3. 只有输入完全没有可画的内容（如寒暄、提问、闲聊）时才自行编造场景，并把 is_fabricated 置为 true；
+   只要用户描述了画面，is_fabricated 必须是 false。
+4. **禁止扩写**：scene 只能包含用户明确提到或必然蕴含的元素。
+   - 不要新增服饰部件、配饰、道具、背景元素、角色数量
+   - 用户没说的（如女仆头饰、围裙、尾巴、伸手邀请、数据海洋）一律不写
+   - 只允许补全纯表现形式：镜头视角、景别、光照方向、构图
+5. 用户要求"简洁/不要太多描述/别加细节"时，scene 压到一句话，只写主体 + 用户提到的关键特征。
 
 ---
 
@@ -494,13 +501,21 @@ Focus on common SD quality issues AND scene-specific problems to avoid. Output O
         for lo in loras:
             desc = lo.get("online_description") or lo.get("description", "无描述")
             triggers = lo.get("online_trigger_words") or lo.get("trigger_words", [])
-            lines.append(
-                f"### {lo['name']}\n"
-                f"- 触发词: {', '.join(triggers) if triggers else '无'}\n"
-                f"- 基础模型: {lo.get('base_model', 'SDXL')}\n"
-                f"- 强度: model={lo.get('strength_model', 0.8)}, clip={lo.get('strength_clip', 0.8)}\n"
-                f"- 描述: {desc[:300]}"
-            )
+            # 触发词通常第一条是 "短 token,长描述串,长描述串…"。短 token 用于激活 LoRA，
+            # 后面那串是该 LoRA 训练集的固定服装/道具，等于把用户没要的元素塞进画面
+            # （deepseek娘的 "maid headdress, blue dress, apron, cetacean tail" 就是这么来的）。
+            token, rest = "", []
+            if triggers:
+                parts = [p.strip() for p in triggers[0].split(",") if p.strip()]
+                token = parts[0] if parts else ""
+                rest = parts[1:]
+            lines.append(f"### {lo['name']}\n"
+                         f"- 激活 token（必须写入 prompt）: {token or '无'}\n"
+                         + (f"- 可选描述串（只有用户明确要求这些元素时才写，禁止默认照抄）: "
+                            f"{', '.join(rest[:12])}\n" if rest else "")
+                         + f"- 基础模型: {lo.get('base_model', 'SDXL')}\n"
+                         f"- 强度: model={lo.get('strength_model', 0.5)}, clip={lo.get('strength_clip', 0.45)}\n"
+                         f"- 描述: {desc[:300]}")
         return "\n\n".join(lines)
 
     def _load_template(self) -> str:

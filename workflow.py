@@ -97,7 +97,10 @@ class Workflow:
             "loras_matched": [],
             "task_id": "",
             "error": "",
+            "user_text": user_text,
         }
+        logger.info("收到输入 (%d 字) → %s", len(user_text or ""),
+                    (user_text or "").replace("\n", " ")[:200])
 
         try:
             # ---- 阶段 1: LoRA 匹配（直接用用户文本，不提前提取场景） ----
