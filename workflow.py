@@ -178,6 +178,9 @@ class Workflow:
 
             # 画风护栏：negative 追加抗写实词 + 风格词加权
             prompt_data = self._apply_style_guard(prompt_data)
+            # 触发词兜底：LoRA 的激活 token 必须精确出现在 prompt 里（LLM 常改写成
+            # 模型名缩写，如 "daxiaonailong" → "nailong"，LoRA 就哑火了）
+            prompt_data = self._ensure_lora_tokens(prompt_data, enriched_loras)
 
             result["prompt_data"] = prompt_data
             logger.info("Prompt 生成完成 → model=%s, size=%dx%d",
@@ -269,6 +272,27 @@ class Workflow:
         if weight > 0 and "anime style" in prompt and "(anime style" not in prompt:
             prompt_data["prompt"] = prompt.replace("anime style", f"(anime style:{weight})", 1)
             logger.info("画风护栏 → anime style 加权至 %s", weight)
+        return prompt_data
+
+    def _ensure_lora_tokens(self, prompt_data: dict, loras: list[dict]) -> dict:
+        """确保每个 LoRA 的激活 token 精确出现在 prompt 开头。
+
+        LoRA 只有在触发词原样出现时才充分激活；LLM 常把 "daxiaonailong" 改写成
+        "nailong"，主体就出不来了。这里用代码兜底，不依赖 LLM 听话。
+        """
+        prompt = prompt_data.get("prompt") or ""
+        added = []
+        for lo in loras:
+            triggers = lo.get("online_trigger_words") or lo.get("trigger_words") or []
+            if not triggers:
+                continue
+            token = str(triggers[0]).split(",")[0].strip()
+            if not token or token.lower() in prompt.lower():
+                continue
+            added.append(token)
+        if added:
+            prompt_data["prompt"] = ", ".join(added) + (", " + prompt if prompt else "")
+            logger.info("触发词补全 → 前置 %s", added)
         return prompt_data
 
     # ------------------------------------------------------------------

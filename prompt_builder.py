@@ -64,8 +64,8 @@ class PromptBuilder:
 
     def build_prompt_from_user_text(self, user_text: str, loras: list,
                                     user_prefs: Optional[dict] = None) -> dict:
-        """合并场景提取和提示词生成为一次 LLM 调用。
 
+        """合并场景提取和提示词生成为一次 LLM 调用。
         将原来的 2 次串行 LLM 调用（extract_scene + build_prompt）
         合并为 1 次。LLM 内部完成：分析输入 → 提取场景 → 生成 prompt。
 
@@ -86,7 +86,10 @@ class PromptBuilder:
             }
             LLM 失败时返回 None，调用方回退到两阶段模式。
         """
-        system_prompt = self._build_combined_prompt(loras)
+        # 用户明确要求简洁时，LoRA 触发词只取"激活 token + 固有属性"，避免把训练集的
+        # 固定服装（女仆头饰、围裙、鲸尾）塞进画面
+        concise = bool(re.search(r"(简洁|简单点|简单些|不要.{0,6}描述|别.{0,6}描述|不要.{0,6}细节|别加|不要.{0,6}编造|无需.{0,6}描述)", user_text))
+        system_prompt = self._build_combined_prompt(loras, concise=concise)
 
         user_msg = f"请分析以下用户输入，提取场景并直接生成最终的英文提示词：\n\n{user_text}"
         if user_prefs:
@@ -446,10 +449,10 @@ Focus on common SD quality issues AND scene-specific problems to avoid. Output O
 - 用户要求"简洁/不要太多描述/别加细节"时，scene 压到一句话（主体 + 用户提到的关键特征）。
 - 不要直接生成英文 Prompt，只需要中文场景描述。"""
 
-    def _build_combined_prompt(self, loras: list) -> str:
+    def _build_combined_prompt(self, loras: list, concise: bool = False) -> str:
         """构建合并模式的系统提示词：场景提取 + 提示词生成。"""
         template = self._load_template()
-        lora_context = self._format_lora_context(loras)
+        lora_context = self._format_lora_context(loras, concise=concise)
 
         return f"""你是一个专业的AI绘画提示词工程师。
 
@@ -458,10 +461,10 @@ Focus on common SD quality issues AND scene-specific problems to avoid. Output O
 2. 如果输入包含多个场景，只提取最后一个场景作为图像生成目标。
 3. 只有输入完全没有可画的内容（如寒暄、提问、闲聊）时才自行编造场景，并把 is_fabricated 置为 true；
    只要用户描述了画面，is_fabricated 必须是 false。
-4. **禁止扩写**：scene 只能包含用户明确提到或必然蕴含的元素。
-   - 不要新增服饰部件、配饰、道具、背景元素、角色数量
-   - 用户没说的（如女仆头饰、围裙、尾巴、伸手邀请、数据海洋）一律不写
-   - 只允许补全纯表现形式：镜头视角、景别、光照方向、构图
+4. **不得新增类别**：可以展开用户已提到名词的固有外观（"奶龙"→ 黄色胖龙、短腿、圆肚皮；
+   "黑蕾丝内衣"→ black lace bra、lace trim），但不得新增用户没提到的服饰部件、配饰、道具、
+   背景元素或角色数量（女仆头饰、围裙、鲸尾、数据海洋都属于新增，不要写）。
+   允许补全的只有纯表现形式：镜头视角、景别、光照方向、构图。
 5. 用户要求"简洁/不要太多描述/别加细节"时，scene 压到一句话，只写主体 + 用户提到的关键特征。
 
 ---
@@ -492,31 +495,47 @@ Focus on common SD quality issues AND scene-specific problems to avoid. Output O
 只输出上述 5 个字段的 JSON 对象，严禁添加 width/height/steps/model/seed 等其他字段。
 直接输出 JSON，不要任何前言后记，不要 markdown 代码块标记。"""
 
-    def _format_lora_context(self, loras: list) -> str:
-        """格式化 LoRA 信息供 LLM 参考。"""
+    # 属于"主体固有属性"的触发词：必须写进 prompt，否则物种/配色会画错
+    _ATTR_HINTS = ("no humans", "skin", "eyes", "eye", "hair", "chibi",
+                   "horn", "horns", "ear", "ears", "fang", "teeth")
+
+    def _format_lora_context(self, loras: list, concise: bool = False) -> str:
+        """格式化 LoRA 信息供 LLM 参考。
+
+        concise=True（用户要求简洁）时只给激活 token + 固有属性词，训练集的固定服装
+        （maid headdress / apron / cetacean tail）不写进画面。但 "no humans, yellow skin,
+        green eyes" 必须保留 —— 少了它们，奶龙会被画成人类剪影（实测：只剩
+        "daxiaonailong" 时出的是黑色人形轮廓）。
+        """
         if not loras:
             return "（无可用 LoRA，生成时不使用 LoRA）"
 
-        lines = []
+        out = []
         for lo in loras:
             desc = lo.get("online_description") or lo.get("description", "无描述")
             triggers = lo.get("online_trigger_words") or lo.get("trigger_words", [])
-            # 触发词通常第一条是 "短 token,长描述串,长描述串…"。短 token 用于激活 LoRA，
-            # 后面那串是该 LoRA 训练集的固定服装/道具，等于把用户没要的元素塞进画面
-            # （deepseek娘的 "maid headdress, blue dress, apron, cetacean tail" 就是这么来的）。
             token, rest = "", []
             if triggers:
-                parts = [p.strip() for p in triggers[0].split(",") if p.strip()]
+                parts = [x.strip() for x in triggers[0].split(",") if x.strip()]
                 token = parts[0] if parts else ""
                 rest = parts[1:]
-            lines.append(f"### {lo['name']}\n"
-                         f"- 激活 token（必须写入 prompt）: {token or '无'}\n"
-                         + (f"- 可选描述串（只有用户明确要求这些元素时才写，禁止默认照抄）: "
-                            f"{', '.join(rest[:12])}\n" if rest else "")
-                         + f"- 基础模型: {lo.get('base_model', 'SDXL')}\n"
-                         f"- 强度: model={lo.get('strength_model', 0.5)}, clip={lo.get('strength_clip', 0.45)}\n"
-                         f"- 描述: {desc[:300]}")
-        return "\n\n".join(lines)
+
+            attrs = [x for x in rest if any(h in x.lower() for h in self._ATTR_HINTS)]
+            extras = [x for x in rest if x not in attrs]
+
+            block = f"### {lo['name']}\n- 激活 token（必须写入 prompt）: {token or '无'}\n"
+            if attrs:
+                block += (f"- 固有属性（必须一起写入，否则物种/配色会画错）: "
+                          f"{', '.join(attrs[:8])}\n")
+            if extras and not concise:
+                block += (f"- 可选描述串（只有用户明确要求这些元素时才写）: "
+                          f"{', '.join(extras[:10])}\n")
+            block += (f"- 基础模型: {lo.get('base_model', 'SDXL')}\n"
+                      f"- 强度: model={lo.get('strength_model', 0.5)}, "
+                      f"clip={lo.get('strength_clip', 0.45)}\n"
+                      f"- 描述: {desc[:300]}")
+            out.append(block)
+        return "\n\n".join(out)
 
     def _load_template(self) -> str:
         """加载专业提示词模板。"""
